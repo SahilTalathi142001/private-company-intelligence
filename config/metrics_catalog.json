@@ -1,0 +1,58 @@
+{
+  "revenue": {
+    "metric_id": "revenue",
+    "metric_name": "Revenue",
+    "category": "profitability",
+    "statement": "income_statement",
+    "data_type": "flow",
+    "unit_type": "currency"
+  },
+  "net_income": {
+    "metric_id": "net_income",
+    "metric_name": "Net Income",
+    "category": "profitability",
+    "statement": "income_statement",
+    "data_type": "flow",
+    "unit_type": "currency"
+  },
+  "operating_income": {
+    "metric_id": "operating_income",
+    "metric_name": "Operating Income",
+    "category": "profitability",
+    "statement": "income_statement",
+    "data_type": "flow",
+    "unit_type": "currency"
+  },
+  "assets": {
+    "metric_id": "assets",
+    "metric_name": "Total Assets",
+    "category": "balance_sheet",
+    "statement": "balance_sheet",
+    "data_type": "stock",
+    "unit_type": "currency"
+  },
+  "liabilities": {
+    "metric_id": "liabilities",
+    "metric_name": "Total Liabilities",
+    "category": "balance_sheet",
+    "statement": "balance_sheet",
+    "data_type": "stock",
+    "unit_type": "currency"
+  },
+  "cash": {
+    "metric_id": "cash",
+    "metric_name": "Cash & Equivalents",
+    "category": "liquidity",
+    "statement": "balance_sheet",
+    "data_type": "stock",
+    "unit_type": "currency"
+  },
+  "equity": {
+    "metric_id": "equity",
+    "metric_name": "Shareholders' Equity",
+    "category": "balance_sheet",
+    "statement": "balance_sheet",
+    "data_type": "stock",
+    "unit_type": "currency"
+  }
+}

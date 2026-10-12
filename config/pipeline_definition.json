@@ -1,0 +1,536 @@
+{
+  "pipeline_version": "1.0.0",
+  "components": [
+    {
+      "component_id": "company_registry",
+      "component_type": "CONTROL",
+      "description": "Authoritative company registry from A1.",
+      "depends_on": [],
+      "trigger_events": [
+        "COMPANY_ONBOARDED"
+      ],
+      "execution_mode": "EVENT_DRIVEN",
+      "retry_policy": {
+        "max_attempts": 3,
+        "backoff_seconds": 60
+      },
+      "dq_gate": null,
+      "outputs": [
+        "company_registry"
+      ],
+      "downstream": [
+        "company_profile",
+        "document_ingestion",
+        "form_d_ingestion",
+        "sec_ingestion",
+        "source_registry"
+      ]
+    },
+    {
+      "component_id": "source_registry",
+      "component_type": "CONTROL",
+      "description": "Authoritative source and company-source configuration from A2.",
+      "depends_on": [
+        "company_registry"
+      ],
+      "trigger_events": [
+        "COMPANY_ONBOARDED",
+        "SOURCE_ENABLED",
+        "SOURCE_DISABLED"
+      ],
+      "execution_mode": "EVENT_DRIVEN",
+      "retry_policy": {
+        "max_attempts": 3,
+        "backoff_seconds": 60
+      },
+      "dq_gate": "source_registry_dq",
+      "outputs": [
+        "source_registry",
+        "company_source_registry"
+      ],
+      "downstream": [
+        "document_ingestion",
+        "form_d_ingestion",
+        "sec_ingestion"
+      ]
+    },
+    {
+      "component_id": "sec_ingestion",
+      "component_type": "INGESTION",
+      "description": "Existing SEC ingestion component.",
+      "depends_on": [
+        "company_registry",
+        "source_registry"
+      ],
+      "trigger_events": [
+        "COMPANY_ONBOARDED",
+        "NEW_SEC_FILING",
+        "SOURCE_DATA_AVAILABLE"
+      ],
+      "execution_mode": "INCREMENTAL",
+      "retry_policy": {
+        "max_attempts": 3,
+        "backoff_seconds": 60
+      },
+      "dq_gate": "sec_ingestion_dq",
+      "outputs": [
+        "sec_bronze",
+        "company",
+        "filings",
+        "financial_facts"
+      ],
+      "downstream": [
+        "financial_normalization",
+        "document_ingestion"
+      ]
+    },
+    {
+      "component_id": "financial_normalization",
+      "component_type": "TRANSFORMATION",
+      "description": "Canonical financial fact normalization from existing pipeline.",
+      "depends_on": [
+        "sec_ingestion"
+      ],
+      "trigger_events": [
+        "PIPELINE_REQUESTED",
+        "SOURCE_DATA_AVAILABLE"
+      ],
+      "execution_mode": "INCREMENTAL",
+      "retry_policy": {
+        "max_attempts": 3,
+        "backoff_seconds": 60
+      },
+      "dq_gate": "financial_normalization_dq",
+      "outputs": [
+        "financial_silver"
+      ],
+      "downstream": [
+        "quarter_derivation"
+      ]
+    },
+    {
+      "component_id": "quarter_derivation",
+      "component_type": "TRANSFORMATION",
+      "description": "Existing quarter derivation using frozen rules.",
+      "depends_on": [
+        "financial_normalization"
+      ],
+      "trigger_events": [
+        "PIPELINE_REQUESTED"
+      ],
+      "execution_mode": "INCREMENTAL",
+      "retry_policy": {
+        "max_attempts": 3,
+        "backoff_seconds": 60
+      },
+      "dq_gate": "quarter_derivation_dq",
+      "outputs": [
+        "quarterly_financials"
+      ],
+      "downstream": [
+        "financial_features"
+      ]
+    },
+    {
+      "component_id": "financial_features",
+      "component_type": "ANALYTICS",
+      "description": "Existing Step 12 financial feature generation.",
+      "depends_on": [
+        "quarter_derivation"
+      ],
+      "trigger_events": [
+        "PIPELINE_REQUESTED"
+      ],
+      "execution_mode": "INCREMENTAL",
+      "retry_policy": {
+        "max_attempts": 3,
+        "backoff_seconds": 60
+      },
+      "dq_gate": "financial_features_dq",
+      "outputs": [
+        "financial_features"
+      ],
+      "downstream": [
+        "company_profile",
+        "financial_decision"
+      ]
+    },
+    {
+      "component_id": "financial_decision",
+      "component_type": "ANALYTICS",
+      "description": "Existing Step 15 financial decision intelligence.",
+      "depends_on": [
+        "financial_features"
+      ],
+      "trigger_events": [
+        "PIPELINE_REQUESTED"
+      ],
+      "execution_mode": "INCREMENTAL",
+      "retry_policy": {
+        "max_attempts": 3,
+        "backoff_seconds": 60
+      },
+      "dq_gate": "financial_decision_dq",
+      "outputs": [
+        "financial_decisions"
+      ],
+      "downstream": [
+        "company_profile",
+        "investment_intelligence"
+      ]
+    },
+    {
+      "component_id": "company_profile",
+      "component_type": "GOLD",
+      "description": "Existing Step 16 authoritative company profile.",
+      "depends_on": [
+        "company_registry",
+        "financial_features",
+        "financial_decision"
+      ],
+      "trigger_events": [
+        "PIPELINE_REQUESTED"
+      ],
+      "execution_mode": "INCREMENTAL",
+      "retry_policy": {
+        "max_attempts": 3,
+        "backoff_seconds": 60
+      },
+      "dq_gate": "company_profile_dq",
+      "outputs": [
+        "company_profile"
+      ],
+      "downstream": [
+        "company_discovery",
+        "investment_intelligence"
+      ]
+    },
+    {
+      "component_id": "form_d_ingestion",
+      "component_type": "INGESTION",
+      "description": "Existing Step 17 SEC Form D processing.",
+      "depends_on": [
+        "company_registry",
+        "source_registry"
+      ],
+      "trigger_events": [
+        "SOURCE_DATA_AVAILABLE",
+        "COMPANY_ONBOARDED"
+      ],
+      "execution_mode": "INCREMENTAL",
+      "retry_policy": {
+        "max_attempts": 3,
+        "backoff_seconds": 60
+      },
+      "dq_gate": "funding_dq",
+      "outputs": [
+        "funding_events"
+      ],
+      "downstream": [
+        "investment_intelligence",
+        "investor_ownership",
+        "valuation"
+      ]
+    },
+    {
+      "component_id": "investor_ownership",
+      "component_type": "ENRICHMENT",
+      "description": "Existing Step 18 investor and ownership layer; no inference.",
+      "depends_on": [
+        "form_d_ingestion"
+      ],
+      "trigger_events": [
+        "PIPELINE_REQUESTED"
+      ],
+      "execution_mode": "INCREMENTAL",
+      "retry_policy": {
+        "max_attempts": 3,
+        "backoff_seconds": 60
+      },
+      "dq_gate": "investor_ownership_dq",
+      "outputs": [
+        "investor_ownership"
+      ],
+      "downstream": [
+        "investment_intelligence"
+      ]
+    },
+    {
+      "component_id": "valuation",
+      "component_type": "ENRICHMENT",
+      "description": "Existing Step 19 valuation layer; SEC capital is never valuation.",
+      "depends_on": [
+        "form_d_ingestion"
+      ],
+      "trigger_events": [
+        "PIPELINE_REQUESTED"
+      ],
+      "execution_mode": "INCREMENTAL",
+      "retry_policy": {
+        "max_attempts": 3,
+        "backoff_seconds": 60
+      },
+      "dq_gate": "valuation_dq",
+      "outputs": [
+        "valuation"
+      ],
+      "downstream": [
+        "investment_intelligence"
+      ]
+    },
+    {
+      "component_id": "investment_intelligence",
+      "component_type": "GOLD",
+      "description": "Existing Step 20 unified investment intelligence; no new financial score.",
+      "depends_on": [
+        "company_profile",
+        "financial_decision",
+        "form_d_ingestion",
+        "investor_ownership",
+        "valuation"
+      ],
+      "trigger_events": [
+        "PIPELINE_REQUESTED"
+      ],
+      "execution_mode": "INCREMENTAL",
+      "retry_policy": {
+        "max_attempts": 3,
+        "backoff_seconds": 60
+      },
+      "dq_gate": "investment_intelligence_dq",
+      "outputs": [
+        "investment_profile",
+        "investment_signals",
+        "investment_summary"
+      ],
+      "downstream": [
+        "company_discovery",
+        "unified_company_view"
+      ]
+    },
+    {
+      "component_id": "unified_company_view",
+      "component_type": "SERVING_GOLD",
+      "description": "Company-grain convergence layer across financial, investment and event-driven intelligence.",
+      "depends_on": [
+        "company_profile",
+        "investment_intelligence"
+      ],
+      "trigger_events": [
+        "PIPELINE_REQUESTED",
+        "NEW_SEC_FILING",
+        "DOCUMENT_RECEIVED"
+      ],
+      "execution_mode": "INCREMENTAL",
+      "retry_policy": {
+        "max_attempts": 3,
+        "backoff_seconds": 60
+      },
+      "dq_gate": "unified_company_view_dq",
+      "outputs": [
+        "unified_company_view"
+      ],
+      "downstream": [
+        "company_discovery"
+      ]
+    },
+    {
+      "component_id": "company_discovery",
+      "component_type": "SERVING_GOLD",
+      "description": "Existing Step 21 company discovery and screening.",
+      "depends_on": [
+        "company_profile",
+        "investment_intelligence",
+        "unified_company_view"
+      ],
+      "trigger_events": [
+        "PIPELINE_REQUESTED"
+      ],
+      "execution_mode": "INCREMENTAL",
+      "retry_policy": {
+        "max_attempts": 3,
+        "backoff_seconds": 60
+      },
+      "dq_gate": "company_discovery_dq",
+      "outputs": [
+        "company_search",
+        "company_screening",
+        "company_intelligence_summary"
+      ],
+      "downstream": []
+    },
+    {
+      "component_id": "document_ingestion",
+      "component_type": "INGESTION",
+      "description": "Discovers and downloads SEC filing primary documents into company-scoped bronze storage.",
+      "depends_on": [
+        "company_registry",
+        "source_registry",
+        "sec_ingestion"
+      ],
+      "trigger_events": [
+        "NEW_SEC_FILING",
+        "DOCUMENT_RECEIVED"
+      ],
+      "execution_mode": "EVENT_DRIVEN",
+      "retry_policy": {
+        "max_attempts": 3,
+        "backoff_seconds": 60
+      },
+      "dq_gate": "document_ingestion_dq",
+      "outputs": [
+        "document_bronze"
+      ],
+      "downstream": [
+        "document_extraction"
+      ]
+    },
+    {
+      "component_id": "document_extraction",
+      "component_type": "TRANSFORMATION",
+      "description": "Deterministically extracts machine-readable text from Bronze documents into Silver document artifacts.",
+      "depends_on": [
+        "document_ingestion"
+      ],
+      "trigger_events": [
+        "DOCUMENT_RECEIVED"
+      ],
+      "execution_mode": "EVENT_DRIVEN",
+      "retry_policy": {
+        "max_attempts": 3,
+        "backoff_seconds": 60
+      },
+      "dq_gate": "document_extraction_dq",
+      "outputs": [
+        "document_text",
+        "document_metadata"
+      ],
+      "downstream": [
+        "document_classification"
+      ]
+    },
+    {
+      "component_id": "document_classification",
+      "component_type": "TRANSFORMATION",
+      "description": "Deterministically classifies extracted documents using SEC metadata, filename rules, text rules, and file type.",
+      "depends_on": [
+        "document_extraction"
+      ],
+      "trigger_events": [
+        "DOCUMENT_RECEIVED",
+        "NEW_SEC_FILING"
+      ],
+      "execution_mode": "EVENT_DRIVEN",
+      "retry_policy": {
+        "max_attempts": 3,
+        "backoff_seconds": 60
+      },
+      "dq_gate": "document_classification_dq",
+      "outputs": [
+        "document_classification"
+      ],
+      "downstream": [
+        "document_understanding"
+      ]
+    },
+    {
+      "component_id": "document_understanding",
+      "component_type": "TRANSFORMATION",
+      "description": "Deterministically extracts explicitly supported facts and structured events from classified documents.",
+      "depends_on": [
+        "document_classification"
+      ],
+      "trigger_events": [
+        "DOCUMENT_RECEIVED",
+        "NEW_SEC_FILING"
+      ],
+      "execution_mode": "EVENT_DRIVEN",
+      "retry_policy": {
+        "max_attempts": 3,
+        "backoff_seconds": 60
+      },
+      "dq_gate": "document_understanding_dq",
+      "outputs": [
+        "document_understanding",
+        "structured_events"
+      ],
+      "downstream": [
+        "structured_event_persistence"
+      ]
+    },
+    {
+      "component_id": "structured_event_persistence",
+      "component_type": "PERSISTENCE",
+      "description": "Persists deterministic structured business events with durable identity, deduplication, provenance, and lifecycle state.",
+      "depends_on": [
+        "document_understanding"
+      ],
+      "trigger_events": [
+        "DOCUMENT_RECEIVED",
+        "NEW_SEC_FILING"
+      ],
+      "execution_mode": "EVENT_DRIVEN",
+      "retry_policy": {
+        "max_attempts": 3,
+        "backoff_seconds": 60
+      },
+      "dq_gate": "structured_event_persistence_dq",
+      "outputs": [
+        "structured_events"
+      ],
+      "downstream": [
+        "company_state_projection"
+      ]
+    },
+    {
+      "component_id": "company_state_projection",
+      "component_type": "TRANSFORMATION",
+      "description": "Projects durable structured business events into the current company intelligence state.",
+      "depends_on": [
+        "structured_event_persistence"
+      ],
+      "trigger_events": [
+        "DOCUMENT_RECEIVED",
+        "NEW_SEC_FILING"
+      ],
+      "execution_mode": "EVENT_DRIVEN",
+      "retry_policy": {
+        "max_attempts": 3,
+        "backoff_seconds": 60
+      },
+      "dq_gate": "company_state_projection_dq",
+      "outputs": [
+        "company_intelligence_state"
+      ],
+      "downstream": [
+        "company_state_investment_intelligence"
+      ]
+    },
+    {
+      "component_id": "company_state_investment_intelligence",
+      "component_type": "ANALYTICS",
+      "description": "Derives deterministic investment signals, decision posture, and unified company investment intelligence from company intelligence state.",
+      "depends_on": [
+        "company_state_projection"
+      ],
+      "trigger_events": [
+        "DOCUMENT_RECEIVED",
+        "NEW_SEC_FILING"
+      ],
+      "execution_mode": "EVENT_DRIVEN",
+      "retry_policy": {
+        "max_attempts": 3,
+        "backoff_seconds": 60
+      },
+      "dq_gate": "company_state_investment_intelligence_dq",
+      "outputs": [
+        "investment_signals",
+        "decision_signals",
+        "unified_investment_intelligence"
+      ],
+      "downstream": [
+        "unified_company_view"
+      ]
+    }
+  ]
+}

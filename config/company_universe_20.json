@@ -1,0 +1,26 @@
+{
+  "version": "37.0.0",
+  "selection_policy": "CONTROLLED_LARGE_CAP_TECH_AND_MARKET_LEADERS",
+  "target_tickers": [
+    "AAPL",
+    "MSFT",
+    "AMZN",
+    "NVDA",
+    "GOOGL",
+    "META",
+    "TSLA",
+    "AVGO",
+    "ORCL",
+    "LLY",
+    "JPM",
+    "V",
+    "WMT",
+    "MA",
+    "XOM",
+    "COST",
+    "NFLX",
+    "AMD",
+    "CRM",
+    "ADBE"
+  ]
+}

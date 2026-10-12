@@ -1,0 +1,1243 @@
+"""
+STEP 21 - COMPANY DISCOVERY / SCREENING
+Version: 21.0.0
+
+Thin deterministic discovery/search/screening layer over:
+    Step 16 Company Intelligence Profile
+    Step 20 Unified Investment Intelligence
+
+No new financial score, ranking, funding-stage inference, investor inference,
+ownership inference, or valuation inference.
+"""
+
+from __future__ import annotations
+
+import argparse
+from importlib import import_module
+import logging
+import math
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+import pandas as pd
+
+try:
+    load_dotenv = import_module("dotenv").load_dotenv
+except ImportError:
+    def load_dotenv(*args: Any, **kwargs: Any) -> bool:
+        return False
+
+load_dotenv()
+
+STEP21_VERSION = "21.0.0"
+STEP16_VERSION_EXPECTED = "1.1.0"
+STEP20_VERSION_EXPECTED = "20.0.0"
+
+ROOT = Path(__file__).resolve().parents[2]
+DATA = ROOT / "data"
+STEP16_ROOT = DATA / "gold" / "financial_company_intelligence"
+STEP20_ROOT = DATA / "gold" / "unified_investment_intelligence"
+COMPANY_MASTER = DATA / "silver" / "company" / "company.parquet"
+OUTPUT = DATA / "gold" / "company_intelligence"
+
+STEP16_PROFILE = STEP16_ROOT / "company_intelligence_profile" / "company_intelligence_profile.parquet"
+STEP20_PROFILE = STEP20_ROOT / "investment_profile" / "investment_profile.parquet"
+STEP20_SIGNALS = STEP20_ROOT / "investment_signals" / "investment_signals.parquet"
+
+VALID_DECISIONS = {"CAUTION", "WATCH", "NEUTRAL", "POSITIVE"}
+VALID_TRAJECTORIES = {"IMPROVING", "MIXED", "DETERIORATING"}
+VALID_POSTURES = {"STRONG_POSITIVE", "POSITIVE", "NEUTRAL", "WATCH", "CAUTION", "INSUFFICIENT_DATA"}
+VALID_COVERAGE = {"COMPLETE", "PARTIAL", "LIMITED", "NO_DATA"}
+VALID_ELIGIBILITY = {"ELIGIBLE", "LIMITED", "INSUFFICIENT_DATA"}
+
+UNIFIED_COMPANY_VIEW = (
+    DATA
+    / "gold"
+    / "unified_company_intelligence"
+    / "unified_company_view"
+    / "unified_company_view.parquet"
+)
+
+UNIFIED_VIEW_COLUMNS = {
+    "cik",
+    "company_id",
+    "company_name",
+    "financial_decision",
+    "financial_score",
+    "company_state_status",
+    "company_state_version",
+    "observed_funding_event_count",
+    "latest_funding_date",
+    "latest_total_offering_amount_usd",
+    "latest_amount_sold_usd",
+    "cumulative_offering_amount_usd",
+    "cumulative_amount_sold_usd",
+    "investment_signal_count",
+    "investment_signal_types",
+    "capital_activity_detected",
+    "recurring_capital_activity",
+    "capital_raise_execution",
+    "event_decision_posture",
+    "event_decision_confidence",
+    "event_decision_id",
+    "source_event_id",
+    "source_run_id",
+    "source_document_id",
+    "source_document_sha256",
+    "unified_company_view_version",
+}
+
+SEARCH_REQUIRED_COLUMNS = {
+    "cik",
+    "company_id",
+    "company_name",
+    "financial_decision",
+    "financial_trajectory",
+    "financial_score",
+    "financial_health",
+    "financial_risk_signal",
+    "peer_position",
+    "peer_population_class",
+    "decision_confidence",
+    "decision_priority",
+    "decision_reason_code",
+    "company_archetype",
+    "funding_status",
+    "funding_event_count",
+    "sec_exempt_offering_capital_usd",
+    "funding_activity_status",
+    "investor_coverage_status",
+    "named_investor_count",
+    "ownership_status",
+    "ownership_pct_available",
+    "valuation_status",
+    "latest_valuation_amount_usd",
+    "latest_valuation_date",
+    "sec_capital_context_usd",
+    "sec_capital_treated_as_valuation",
+    "valuation_fabrication_prevented",
+    "data_coverage",
+    "unified_posture",
+    "profile_quality",
+    "screening_eligibility",
+    "is_strong_positive",
+    "is_positive",
+    "is_improving",
+    "is_low_risk",
+    "has_funding_data",
+    "has_investor_data",
+    "has_valuation_data",
+    "has_complete_data",
+    "company_state_status",
+    "company_state_version",
+    "observed_funding_event_count",
+    "latest_funding_date",
+    "latest_total_offering_amount_usd",
+    "latest_amount_sold_usd",
+    "cumulative_offering_amount_usd",
+    "cumulative_amount_sold_usd",
+    "investment_signal_count",
+    "investment_signal_types",
+    "capital_activity_detected",
+    "recurring_capital_activity",
+    "capital_raise_execution",
+    "event_decision_posture",
+    "event_decision_confidence",
+    "event_decision_id",
+    "source_event_id",
+    "source_run_id",
+    "source_document_id",
+    "source_document_sha256",
+    "unified_company_view_version",
+}
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
+logger = logging.getLogger("step21")
+
+
+def now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def cik(value: Any) -> str:
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except Exception:
+        pass
+    text = str(value).strip()
+    if text.endswith(".0"):
+        text = text[:-2]
+    digits = "".join(x for x in text if x.isdigit())
+    return digits.zfill(10) if digits else ""
+
+
+def text(value: Any) -> str | None:
+    if value is None:
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except Exception:
+        pass
+    value = " ".join(str(value).split()).strip()
+    return value if value and value.lower() not in {"nan", "none", "<na>", "nat"} else None
+
+
+def upper(value: Any) -> str | None:
+    value = text(value)
+    return value.upper() if value else None
+
+
+def number(value: Any) -> float | None:
+    try:
+        if value is None or pd.isna(value):
+            return None
+        value = float(value)
+        return value if math.isfinite(value) else None
+    except (TypeError, ValueError):
+        return None
+
+
+def integer(value: Any) -> int | None:
+    value = number(value)
+    return int(value) if value is not None else None
+
+
+def boolean(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    try:
+        if pd.isna(value):
+            return False
+    except Exception:
+        pass
+    return str(value).strip().upper() in {"TRUE", "1", "YES", "Y"}
+
+
+def read(path: Path, label: str) -> pd.DataFrame:
+    if not path.exists():
+        raise FileNotFoundError(f"{label} not found: {path}")
+    df = pd.read_parquet(path)
+    if not isinstance(df, pd.DataFrame):
+        raise TypeError(f"{label} is not a DataFrame: {path}")
+    return df
+
+
+def require(df: pd.DataFrame, columns: set[str], label: str) -> None:
+    missing = sorted(columns - set(df.columns))
+    if missing:
+        raise ValueError(f"{label} missing required columns: {missing}")
+
+
+def write(df: pd.DataFrame, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp.parquet")
+    if tmp.exists():
+        tmp.unlink()
+    df.to_parquet(tmp, index=False)
+    tmp.replace(path)
+
+
+def validate_versions(df: pd.DataFrame, column: str, expected: str, label: str) -> None:
+    observed = {str(x).strip() for x in df[column].dropna()}
+    if observed != {expected}:
+        raise ValueError(f"{label} version mismatch. Expected {expected}; observed {sorted(observed)}")
+
+
+def load_step16(path: Path) -> pd.DataFrame:
+    df = read(path, "Step 16 profile")
+    require(df, {
+        "cik", "company_name", "financial_health", "financial_risk_signal",
+        "financial_trajectory", "peer_position", "peer_population_class",
+        "decision_posture", "decision_priority", "decision_confidence",
+        "decision_reason_code", "company_archetype", "profile_quality",
+        "profile_version"
+    }, "Step 16 profile")
+    df = df.copy()
+    df["cik"] = df["cik"].map(cik)
+    if df["cik"].eq("").any() or df["cik"].duplicated().any():
+        raise ValueError("Step 16 profile must contain valid unique CIKs.")
+    validate_versions(df, "profile_version", STEP16_VERSION_EXPECTED, "Step 16")
+    return df
+
+
+def load_step20(path: Path) -> pd.DataFrame:
+    df = read(path, "Step 20 profile")
+    require(df, {
+        "cik", "financial_decision", "financial_trajectory", "financial_score",
+        "funding_status", "funding_event_count", "sec_exempt_offering_capital_usd",
+        "funding_activity_status", "investor_coverage_status", "named_investor_count",
+        "ownership_status", "ownership_pct_available", "valuation_status",
+        "latest_valuation_amount_usd", "latest_valuation_date",
+        "sec_capital_context_usd", "sec_capital_treated_as_valuation",
+        "valuation_fabrication_prevented", "data_coverage", "unified_posture",
+        "step20_version"
+    }, "Step 20 profile")
+    df = df.copy()
+    df["cik"] = df["cik"].map(cik)
+    if df["cik"].eq("").any() or df["cik"].duplicated().any():
+        raise ValueError("Step 20 profile must contain valid unique CIKs.")
+    validate_versions(df, "step20_version", STEP20_VERSION_EXPECTED, "Step 20")
+    return df
+
+
+def load_master(path: Path) -> pd.DataFrame:
+    df = pd.read_csv(path) if path.suffix.lower() == ".csv" else pd.read_parquet(path)
+    require(df, {"cik", "company_name"}, "Company master")
+    df = df.copy()
+    df["cik"] = df["cik"].map(cik)
+    df["company_name"] = df["company_name"].map(text)
+    if df["cik"].eq("").any() or df["company_name"].isna().any():
+        raise ValueError("Company master contains invalid identity.")
+    conflicts = df.groupby("cik")["company_name"].nunique()
+    bad = sorted(conflicts[conflicts > 1].index)
+    if bad:
+        raise ValueError(f"Company master has conflicting names: {bad}")
+    return df.drop_duplicates("cik").reset_index(drop=True)
+
+
+def eligibility(decision: str | None, quality: str | None, coverage: str | None) -> str:
+    if decision not in VALID_DECISIONS:
+        return "INSUFFICIENT_DATA"
+    if quality == "COMPLETE" and coverage in VALID_COVERAGE - {"NO_DATA"}:
+        return "ELIGIBLE"
+    return "LIMITED"
+
+
+def merged_value(row: pd.Series, field: str, side: str) -> Any:
+    """Read a column after a pandas merge.
+
+    Pandas suffixes only names that exist on both inputs. Which names overlap
+    changes as the company universe and upstream schemas grow, so a hard-coded
+    suffix reads None for every non-overlapping field. Prefer the owned
+    suffix, then the unsuffixed name.
+    """
+    suffixed = f"{field}_{side}"
+    if suffixed in row.index:
+        return row[suffixed]
+    if field in row.index:
+        return row[field]
+    return None
+
+
+def _debug_log(hypothesis_id: str, location: str, message: str, data: dict[str, Any], run_id: str = "post-fix") -> None:
+    # region agent log
+    try:
+        import json
+        import time
+        payload = {
+            "sessionId": "63fc53",
+            "runId": run_id,
+            "hypothesisId": hypothesis_id,
+            "location": location,
+            "message": message,
+            "data": data,
+            "timestamp": int(time.time() * 1000),
+        }
+        with open(ROOT / "debug-63fc53.log", "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload) + "\n")
+    except Exception:
+        pass
+    # endregion
+
+
+def build_search(step16: pd.DataFrame, step20: pd.DataFrame, master: pd.DataFrame) -> pd.DataFrame:
+    if set(step16.cik) != set(step20.cik):
+        raise ValueError("Step 16 and Step 20 company universes do not match.")
+
+    merged = step20.merge(step16, on="cik", how="inner", suffixes=("_20", "_16"), validate="one_to_one")
+    merged = merged.merge(master, on="cik", how="left", suffixes=("", "_master"), validate="one_to_one")
+
+    # region agent log
+    _probe = [
+        ("financial_decision", "20"),
+        ("financial_trajectory", "20"),
+        ("profile_quality", "16"),
+        ("peer_position", "16"),
+        ("funding_event_count", "20"),
+        ("valuation_fabrication_prevented", "20"),
+        ("data_coverage", "20"),
+        ("decision_priority", "16"),
+        ("ticker", "master"),
+        ("company_name", "master"),
+        ("profile_version", "16"),
+        ("step20_version", "20"),
+    ]
+    _resolution = {}
+    for _field, _side in _probe:
+        _suffixed = f"{_field}_{_side}"
+        if _suffixed in merged.columns:
+            _resolution[f"{_field}|{_side}"] = "suffix"
+        elif _field in merged.columns:
+            _resolution[f"{_field}|{_side}"] = "bare"
+        else:
+            _resolution[f"{_field}|{_side}"] = "missing"
+    _debug_log(
+        "A",
+        "step_21_company_discovery_screening.py:build_search",
+        "merge suffix resolution",
+        {
+            "rows": int(len(merged)),
+            "master_rows": int(len(master)),
+            "suffixed_columns": [c for c in merged.columns if c.endswith(("_20", "_16", "_master"))],
+            "resolution": _resolution,
+        },
+    )
+    # endregion
+
+    rows = []
+    for _, r in merged.iterrows():
+        # Suffixes are applied only to overlapping names. Resolve each field
+        # from its owning side so a larger universe cannot drop values.
+        decision = upper(merged_value(r, "financial_decision", "20"))
+        trajectory = upper(merged_value(r, "financial_trajectory", "20"))
+        posture = upper(merged_value(r, "unified_posture", "20")) or "INSUFFICIENT_DATA"
+        coverage = upper(merged_value(r, "data_coverage", "20")) or "NO_DATA"
+        funding = upper(merged_value(r, "funding_status", "20")) or "NO_DATA"
+        investor = upper(merged_value(r, "investor_coverage_status", "20")) or "NO_DATA"
+        ownership = upper(merged_value(r, "ownership_status", "20")) or "NO_DATA"
+        valuation = upper(merged_value(r, "valuation_status", "20")) or "NO_DATA"
+        quality = upper(merged_value(r, "profile_quality", "16")) or "LIMITED"
+        risk = upper(merged_value(r, "financial_risk_signal", "16"))
+        ownership_pct = merged_value(r, "ownership_pct_available", "20")
+
+        rows.append({
+            "cik": cik(r["cik"]),
+            "company_id": f"SEC_{cik(r['cik'])}",
+            "company_name": text(merged_value(r, "company_name", "master")) or text(merged_value(r, "company_name", "16")) or cik(r["cik"]),
+            "ticker": text(merged_value(r, "ticker", "master")),
+            "industry": text(merged_value(r, "industry", "master")),
+            "founded_year": integer(merged_value(r, "founded_year", "master")),
+            "headquarters": text(merged_value(r, "headquarters", "master")),
+            "company_status": text(merged_value(r, "company_status", "master")) or text(merged_value(r, "status", "master")),
+
+            "financial_decision": decision,
+            "financial_trajectory": trajectory,
+            "financial_score": number(merged_value(r, "financial_score", "20")),
+            "financial_health": upper(merged_value(r, "financial_health", "16")),
+            "financial_risk_signal": risk,
+            "peer_position": upper(merged_value(r, "peer_position", "16")),
+            "peer_population_class": upper(merged_value(r, "peer_population_class", "16")),
+            "decision_confidence": upper(merged_value(r, "decision_confidence", "16")),
+            "decision_priority": integer(merged_value(r, "decision_priority", "16")),
+            "decision_reason_code": upper(merged_value(r, "decision_reason_code", "16")),
+            "company_archetype": upper(merged_value(r, "company_archetype", "16")),
+
+            "funding_status": funding,
+            "funding_event_count": integer(merged_value(r, "funding_event_count", "20")),
+            "sec_exempt_offering_capital_usd": number(merged_value(r, "sec_exempt_offering_capital_usd", "20")),
+            "funding_activity_status": upper(merged_value(r, "funding_activity_status", "20")) or "NO_DATA",
+            "last_funding_date": merged_value(r, "last_funding_date", "20"),
+
+            "investor_coverage_status": investor,
+            "named_investor_count": integer(merged_value(r, "named_investor_count", "20")),
+
+            "ownership_status": ownership,
+            "ownership_pct_available": None if pd.isna(ownership_pct) else boolean(ownership_pct),
+
+            "valuation_status": valuation,
+            "latest_valuation_amount_usd": number(merged_value(r, "latest_valuation_amount_usd", "20")),
+            "latest_valuation_date": merged_value(r, "latest_valuation_date", "20"),
+
+            "sec_capital_context_usd": number(merged_value(r, "sec_capital_context_usd", "20")),
+            "sec_capital_treated_as_valuation": boolean(merged_value(r, "sec_capital_treated_as_valuation", "20")),
+            "valuation_fabrication_prevented": boolean(merged_value(r, "valuation_fabrication_prevented", "20")),
+
+            "data_coverage": coverage,
+            "unified_posture": posture,
+            "profile_quality": quality,
+
+            "screening_eligibility": eligibility(decision, quality, coverage),
+            "is_strong_positive": posture == "STRONG_POSITIVE",
+            "is_positive": posture in {"STRONG_POSITIVE", "POSITIVE"},
+            "is_improving": trajectory == "IMPROVING",
+            "is_low_risk": risk == "LOW",
+            "has_funding_data": funding == "AVAILABLE",
+            "has_investor_data": investor == "AVAILABLE",
+            "has_valuation_data": valuation == "AVAILABLE",
+            "has_complete_data": coverage == "COMPLETE",
+
+            "step16_version": text(merged_value(r, "profile_version", "16")),
+            "step20_version": text(merged_value(r, "step20_version", "20")),
+            "step21_version": STEP21_VERSION,
+            "generated_at_utc": now(),
+        })
+
+    result = pd.DataFrame(rows)
+    if result.empty:
+        raise ValueError("Step 21 produced no company search rows.")
+    # region agent log
+    _debug_log(
+        "A",
+        "step_21_company_discovery_screening.py:build_search",
+        "resolved search values",
+        {
+            "financial_decision": result["financial_decision"].fillna("").value_counts().astype(int).to_dict(),
+            "profile_quality": result["profile_quality"].fillna("").value_counts().astype(int).to_dict(),
+            "funding_event_count_nulls": int(result["funding_event_count"].isna().sum()),
+            "valuation_fabrication_all_true": bool(result["valuation_fabrication_prevented"].map(boolean).all()),
+            "ticker_present": int(result["ticker"].fillna("").ne("").sum()),
+            "decision_priority_present": int(result["decision_priority"].notna().sum()),
+        },
+    )
+    # endregion
+    return result.sort_values(["company_name", "cik"]).reset_index(drop=True)
+
+
+def enrich_with_unified_company_view(
+    search: pd.DataFrame,
+    unified_view: pd.DataFrame,
+) -> pd.DataFrame:
+    """Attach the convergence-layer fields to the Step 21 company grain.
+
+    The Unified Company View is required to cover exactly the same company
+    universe as Step 21. A left join with silent gaps would make screening
+    non-deterministic, so universe parity is enforced here.
+    """
+    require(unified_view, UNIFIED_VIEW_COLUMNS, "Unified Company View")
+
+    unified = unified_view.copy()
+    unified["cik"] = unified["cik"].map(cik)
+
+    if unified["cik"].eq("").any():
+        raise ValueError("Unified Company View contains blank CIK values.")
+
+    if unified["cik"].duplicated().any():
+        raise ValueError("Unified Company View must contain one row per CIK.")
+
+    search_ciks = set(search["cik"].map(cik))
+    unified_ciks = set(unified["cik"])
+
+    missing = sorted(search_ciks - unified_ciks)
+    extra = sorted(unified_ciks - search_ciks)
+
+    if missing or extra:
+        raise ValueError(
+            "Unified Company View universe mismatch. "
+            f"missing_from_view={missing}; extra_in_view={extra}"
+        )
+
+    unified_columns = [
+        column
+        for column in unified.columns
+        if column == "cik" or column not in search.columns
+    ]
+
+    result = search.merge(
+        unified[unified_columns],
+        on="cik",
+        how="left",
+        validate="one_to_one",
+    )
+
+    return result
+
+def build_screening(search: pd.DataFrame) -> pd.DataFrame:
+    """Build the final deterministic Company Discovery / Investment Screening projection."""
+    require(search, SEARCH_REQUIRED_COLUMNS, "Enriched company search")
+
+    columns = [
+        # Identity
+        "cik",
+        "company_id",
+        "company_name",
+        "ticker",
+        "industry",
+        "company_status",
+
+        # Financial intelligence
+        "screening_eligibility",
+        "financial_decision",
+        "financial_trajectory",
+        "financial_score",
+        "financial_health",
+        "financial_risk_signal",
+        "decision_confidence",
+        "decision_priority",
+        "decision_reason_code",
+        "company_archetype",
+
+        # Existing investment intelligence
+        "unified_posture",
+        "data_coverage",
+        "funding_status",
+        "funding_event_count",
+        "funding_activity_status",
+        "investor_coverage_status",
+        "named_investor_count",
+        "ownership_status",
+        "ownership_pct_available",
+        "valuation_status",
+        "latest_valuation_amount_usd",
+        "latest_valuation_date",
+        "sec_capital_context_usd",
+        "sec_capital_treated_as_valuation",
+        "valuation_fabrication_prevented",
+
+        # Screening flags
+        "is_strong_positive",
+        "is_positive",
+        "is_improving",
+        "is_low_risk",
+        "has_funding_data",
+        "has_investor_data",
+        "has_valuation_data",
+        "has_complete_data",
+
+        # Company Intelligence State
+        "company_state_status",
+        "company_state_version",
+        "observed_funding_event_count",
+        "latest_funding_date",
+        "latest_total_offering_amount_usd",
+        "latest_amount_sold_usd",
+        "cumulative_offering_amount_usd",
+        "cumulative_amount_sold_usd",
+
+        # Investment Signals
+        "investment_signal_count",
+        "investment_signal_types",
+        "capital_activity_detected",
+        "recurring_capital_activity",
+        "capital_raise_execution",
+
+        # Decision Intelligence
+        "event_decision_posture",
+        "event_decision_confidence",
+        "event_decision_id",
+
+        # Provenance
+        "source_event_id",
+        "source_run_id",
+        "source_document_id",
+        "source_document_sha256",
+        "unified_company_view_version",
+    ]
+
+    missing = sorted(set(columns) - set(search.columns))
+    if missing:
+        raise ValueError(
+            "Final company screening is missing required columns: "
+            f"{missing}"
+        )
+
+    result = search[columns].copy()
+    result["step21_version"] = STEP21_VERSION
+    result["generated_at_utc"] = now()
+
+    return result
+
+def validate_search(df: pd.DataFrame) -> list[dict[str, Any]]:
+    """Run deterministic Step 21 DQ checks on the final enriched search grain."""
+    errors: list[tuple[str, str, str]] = []
+
+    missing = SEARCH_REQUIRED_COLUMNS - set(df.columns)
+    if missing:
+        errors.append(
+            (
+                "SEARCH_SCHEMA",
+                "FATAL",
+                f"Missing required search columns: {sorted(missing)}",
+            )
+        )
+        return [
+            {"check_name": a, "severity": b, "message": c, "cik": ""}
+            for a, b, c in errors
+        ]
+
+    if df["cik"].duplicated().any():
+        errors.append(
+            ("SEARCH_GRAIN", "FATAL", "Company search is not one row per CIK.")
+        )
+
+    if df["cik"].eq("").any():
+        errors.append(("IDENTITY", "FATAL", "Blank CIK detected."))
+
+    if "company_id" in df.columns:
+        expected_company_ids = "SEC_" + df["cik"]
+        actual_company_ids = df["company_id"].map(text)
+
+        if not actual_company_ids.equals(expected_company_ids):
+            errors.append(
+                (
+                    "COMPANY_ID_CIK_ALIGNMENT",
+                    "FATAL",
+                    "company_id must equal SEC_<normalized CIK>.",
+                )
+            )
+
+    for col, allowed in [
+        ("financial_decision", VALID_DECISIONS),
+        ("financial_trajectory", VALID_TRAJECTORIES),
+        ("unified_posture", VALID_POSTURES),
+        ("data_coverage", VALID_COVERAGE),
+        ("screening_eligibility", VALID_ELIGIBILITY),
+    ]:
+        bad = {
+            value
+            for value in df[col].dropna().map(upper)
+            if value and value not in allowed
+        }
+        if bad:
+            errors.append(
+                (
+                    f"{col.upper()}_VALUES",
+                    "FATAL",
+                    f"Invalid values: {sorted(bad)}",
+                )
+            )
+
+    if not df["sec_capital_treated_as_valuation"].map(boolean).eq(False).all():
+        errors.append(
+            (
+                "SEC_CAPITAL_SEPARATION",
+                "FATAL",
+                "SEC capital treated as valuation.",
+            )
+        )
+
+    if not df["valuation_fabrication_prevented"].map(boolean).eq(True).all():
+        errors.append(
+            (
+                "VALUATION_CONTROL",
+                "FATAL",
+                "Valuation fabrication prevention disabled.",
+            )
+        )
+
+    checks = [
+        (
+            "is_strong_positive",
+            df["unified_posture"].map(upper).eq("STRONG_POSITIVE"),
+        ),
+        (
+            "is_positive",
+            df["unified_posture"]
+            .map(upper)
+            .isin({"STRONG_POSITIVE", "POSITIVE"}),
+        ),
+        (
+            "is_improving",
+            df["financial_trajectory"].map(upper).eq("IMPROVING"),
+        ),
+        (
+            "is_low_risk",
+            df["financial_risk_signal"].map(upper).eq("LOW"),
+        ),
+        (
+            "has_funding_data",
+            df["funding_status"].map(upper).eq("AVAILABLE"),
+        ),
+        (
+            "has_investor_data",
+            df["investor_coverage_status"].map(upper).eq("AVAILABLE"),
+        ),
+        (
+            "has_valuation_data",
+            df["valuation_status"].map(upper).eq("AVAILABLE"),
+        ),
+        (
+            "has_complete_data",
+            df["data_coverage"].map(upper).eq("COMPLETE"),
+        ),
+    ]
+
+    for col, expected in checks:
+        if not expected.equals(df[col].map(boolean)):
+            errors.append(
+                (
+                    f"{col.upper()}_DETERMINISM",
+                    "FATAL",
+                    f"{col} is not deterministic.",
+                )
+            )
+
+    allowed_event_postures = {"POSITIVE", "MONITOR", "INSUFFICIENT_DATA"}
+
+    bad_event_postures = {
+        value
+        for value in df["event_decision_posture"].dropna().map(upper)
+        if value not in allowed_event_postures
+    }
+
+    if bad_event_postures:
+        errors.append(
+            (
+                "EVENT_DECISION_POSTURE",
+                "FATAL",
+                "Invalid event decision posture values: "
+                f"{sorted(bad_event_postures)}",
+            )
+        )
+
+    required_event_columns = {
+        "company_state_status",
+        "company_state_version",
+        "investment_signal_count",
+        "event_decision_posture",
+        "event_decision_confidence",
+        "event_decision_id",
+        "source_event_id",
+        "source_run_id",
+        "source_document_id",
+        "source_document_sha256",
+        "unified_company_view_version",
+    }
+
+    missing_event_columns = (
+        required_event_columns - set(df.columns)
+    )
+
+    if missing_event_columns:
+        errors.append(
+            (
+                "EVENT_INTELLIGENCE_SCHEMA",
+                "FATAL",
+                "Missing event intelligence columns: "
+                f"{sorted(missing_event_columns)}",
+            )
+        )
+
+    if "investment_signal_count" in df.columns:
+        signal_counts = pd.to_numeric(
+            df["investment_signal_count"],
+            errors="coerce",
+        )
+
+        if signal_counts.fillna(0).lt(0).any():
+            errors.append(
+                (
+                    "INVESTMENT_SIGNAL_COUNT",
+                    "FATAL",
+                    "Investment signal count cannot be negative.",
+                )
+            )
+
+    return [
+        {"check_name": a, "severity": b, "message": c, "cik": ""}
+        for a, b, c in errors
+    ]
+
+def reconcile(search: pd.DataFrame, source: pd.DataFrame, fields: list[str], label: str) -> list[dict[str, Any]]:
+    src = source.copy()
+    src["cik"] = src["cik"].map(cik)
+    merged = search.merge(src, on="cik", how="left", suffixes=("_21", "_src"), validate="one_to_one")
+    errors = []
+
+    for _, r in merged.iterrows():
+        key = cik(r["cik"])
+        for f in fields:
+            a, b = r.get(f"{f}_21"), r.get(f"{f}_src")
+            if f in {"financial_score", "funding_event_count", "sec_exempt_offering_capital_usd",
+                     "named_investor_count", "latest_valuation_amount_usd", "decision_priority"}:
+                if number(a) is None and number(b) is None:
+                    continue
+                if number(a) is None or number(b) is None or abs(number(a) - number(b)) > 1e-9:
+                    errors.append({"check_name": label, "severity": "FATAL",
+                                    "message": f"{f} mismatch: step21={a!r}, source={b!r}", "cik": key})
+            elif f == "ownership_pct_available":
+                if (None if pd.isna(a) else boolean(a)) != (None if pd.isna(b) else boolean(b)):
+                    errors.append({"check_name": label, "severity": "FATAL",
+                                    "message": f"{f} mismatch.", "cik": key})
+            elif upper(a) != upper(b):
+                errors.append({"check_name": label, "severity": "FATAL",
+                                "message": f"{f} mismatch: step21={a!r}, source={b!r}", "cik": key})
+    return errors
+
+
+def summary(search: pd.DataFrame, screening: pd.DataFrame) -> pd.DataFrame:
+    def count(col: str, value: str) -> int:
+        return int(search[col].map(upper).eq(value).sum())
+
+    return pd.DataFrame([{
+        "step": "STEP_21",
+        "step21_version": STEP21_VERSION,
+        "configured_company_count": int(search.cik.nunique()),
+        "company_search_rows": len(search),
+        "screening_rows": len(screening),
+        "strong_positive_count": count("unified_posture", "STRONG_POSITIVE"),
+        "positive_count": count("unified_posture", "POSITIVE"),
+        "neutral_count": count("unified_posture", "NEUTRAL"),
+        "watch_count": count("unified_posture", "WATCH"),
+        "caution_count": count("unified_posture", "CAUTION"),
+        "insufficient_data_count": count("unified_posture", "INSUFFICIENT_DATA"),
+        "eligible_count": count("screening_eligibility", "ELIGIBLE"),
+        "limited_count": count("screening_eligibility", "LIMITED"),
+        "insufficient_screening_count": count("screening_eligibility", "INSUFFICIENT_DATA"),
+        "complete_data_count": count("data_coverage", "COMPLETE"),
+        "partial_data_count": count("data_coverage", "PARTIAL"),
+        "limited_data_count": count("data_coverage", "LIMITED"),
+        "no_data_count": count("data_coverage", "NO_DATA"),
+        "new_financial_score_created": False,
+        "new_ranking_created": False,
+        "funding_stage_inference": False,
+        "investor_identity_inference": False,
+        "ownership_inference": False,
+        "valuation_inference": False,
+        "sec_capital_treated_as_valuation": False,
+        "generated_at_utc": now(),
+    }])
+
+
+def lineage() -> pd.DataFrame:
+    items = [
+        ("cik", "Step 16 / Step 20 / Unified Company View", "Authoritative normalized company key"),
+        ("company_name", "Company master / Step 16 / Unified Company View", "Identity pass-through"),
+        ("ticker", "Optional company master", "Pass-through; no inference"),
+        ("industry", "Optional company master", "Pass-through; no inference"),
+        ("founded_year", "Optional company master", "Pass-through; no inference"),
+        ("headquarters", "Optional company master", "Pass-through; no inference"),
+        ("financial_decision", "Step 20", "Existing Step 15 decision pass-through"),
+        ("financial_trajectory", "Step 20", "Existing Step 15 trajectory pass-through"),
+        ("financial_score", "Step 20", "Pass-through; no new score"),
+        ("funding_status", "Step 20", "Existing Step 17 coverage"),
+        ("investor_coverage_status", "Step 20", "Existing Step 18 coverage"),
+        ("ownership_status", "Step 20", "Existing Step 18 coverage"),
+        ("valuation_status", "Step 20", "Existing Step 19 coverage"),
+        ("latest_valuation_amount_usd", "Step 20", "Source-aware valuation pass-through"),
+        ("sec_capital_context_usd", "Step 20", "SEC exempt-offering context only"),
+        ("data_coverage", "Step 20", "Existing cross-layer coverage"),
+        ("unified_posture", "Step 20", "Existing deterministic posture"),
+        ("screening_eligibility", "Step 21", "Deterministic availability rule"),
+        ("is_strong_positive", "Step 21", "Posture filter"),
+        ("is_positive", "Step 21", "Posture filter"),
+        ("is_improving", "Step 21", "Trajectory filter"),
+        ("is_low_risk", "Step 21", "Existing risk signal filter"),
+        ("has_funding_data", "Step 21", "Funding coverage filter"),
+        ("has_investor_data", "Step 21", "Investor coverage filter"),
+        ("has_valuation_data", "Step 21", "Valuation coverage filter"),
+        ("has_complete_data", "Step 21", "Data coverage filter"),
+        ("company_state_status", "Company Intelligence State", "Event-driven state status pass-through"),
+        ("company_state_version", "Company Intelligence State", "Event-driven state version pass-through"),
+        ("observed_funding_event_count", "Company Intelligence State", "Observed structured-event count"),
+        ("latest_funding_date", "Company Intelligence State", "Latest observed funding event date"),
+        ("latest_total_offering_amount_usd", "Company Intelligence State", "Latest explicitly observed offering amount"),
+        ("latest_amount_sold_usd", "Company Intelligence State", "Latest explicitly observed amount sold"),
+        ("cumulative_offering_amount_usd", "Company Intelligence State", "Cumulative explicitly observed offering amount"),
+        ("cumulative_amount_sold_usd", "Company Intelligence State", "Cumulative explicitly observed amount sold"),
+        ("investment_signal_count", "Investment Signals", "Deterministic event-driven signal count"),
+        ("investment_signal_types", "Investment Signals", "Deterministic signal type projection"),
+        ("capital_activity_detected", "Investment Signals", "Pass-through of capital activity signal"),
+        ("recurring_capital_activity", "Investment Signals", "Pass-through of recurring activity signal"),
+        ("capital_raise_execution", "Investment Signals", "Pass-through of explicit offering/sold signal"),
+        ("event_decision_posture", "Decision Intelligence", "Deterministic event-driven decision posture"),
+        ("event_decision_confidence", "Decision Intelligence", "Decision confidence pass-through"),
+        ("event_decision_id", "Decision Intelligence", "Deterministic decision identity"),
+        ("source_event_id", "Unified Company View", "Latest structured-event provenance"),
+        ("source_run_id", "Unified Company View", "Latest pipeline-run provenance"),
+        ("source_document_id", "Unified Company View", "Latest source-document provenance"),
+        ("source_document_sha256", "Unified Company View", "Latest source-document hash"),
+        ("unified_company_view_version", "Unified Company View", "Convergence-layer version pass-through"),
+    ]
+
+    return pd.DataFrame(
+        [
+            {
+                "output_field": output_field,
+                "source": source,
+                "transformation": transformation,
+                "step21_version": STEP21_VERSION,
+                "new_financial_score_created": False,
+            }
+            for output_field, source, transformation in items
+        ]
+    )
+
+def load_unified_company_view(path: Path) -> pd.DataFrame:
+    """Load and validate the convergence-layer artifact consumed by Step 21."""
+    df = read(path, "Unified Company View")
+    require(df, UNIFIED_VIEW_COLUMNS, "Unified Company View")
+
+    df = df.copy()
+    df["cik"] = df["cik"].map(cik)
+
+    if df["cik"].eq("").any():
+        raise ValueError("Unified Company View contains blank CIK values.")
+
+    if df["cik"].duplicated().any():
+        raise ValueError("Unified Company View must contain one row per CIK.")
+
+    expected_company_ids = "SEC_" + df["cik"]
+    actual_company_ids = df["company_id"].map(text)
+    mismatch = actual_company_ids != expected_company_ids
+    if mismatch.any():
+        bad = df.loc[mismatch, ["cik", "company_id"]].to_dict("records")
+        raise ValueError(
+            "Unified Company View company_id/CIK mismatch: "
+            f"{bad}"
+        )
+
+    return df
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Step 21 - Company Discovery / Screening"
+    )
+    parser.add_argument(
+        "--unified-company-view",
+        type=Path,
+        default=UNIFIED_COMPANY_VIEW,
+        help="Unified Company View parquet artifact.",
+    )
+    parser.add_argument("--step16-profile", type=Path, default=STEP16_PROFILE)
+    parser.add_argument("--step20-profile", type=Path, default=STEP20_PROFILE)
+    parser.add_argument("--step20-signals", type=Path, default=STEP20_SIGNALS)
+    parser.add_argument("--company-master", type=Path, default=COMPANY_MASTER)
+    parser.add_argument("--output", type=Path, default=OUTPUT)
+    args = parser.parse_args()
+
+    logger.info("=" * 80)
+    logger.info("STEP 21 - COMPANY DISCOVERY / SCREENING")
+    logger.info("Step 21 version: %s", STEP21_VERSION)
+    logger.info("New financial score: NO | New ranking: NO")
+    logger.info("Unified Company View: REQUIRED")
+    logger.info("=" * 80)
+
+    s16 = load_step16(args.step16_profile)
+    s20 = load_step20(args.step20_profile)
+
+    signals = read(args.step20_signals, "Step 20 signals")
+    require(
+        signals,
+        {"cik", "signal_type", "signal_status", "step20_version"},
+        "Step 20 signals",
+    )
+    validate_versions(
+        signals,
+        "step20_version",
+        STEP20_VERSION_EXPECTED,
+        "Step 20 signals",
+    )
+
+    master = load_master(args.company_master)
+    unified_view = load_unified_company_view(args.unified_company_view)
+
+    logger.info("Step 16 profile rows : %d", len(s16))
+    logger.info("Step 20 profile rows : %d", len(s20))
+    logger.info("Step 20 signal rows  : %d", len(signals))
+    logger.info("Company master rows  : %d", len(master))
+    logger.info("Unified view rows    : %d", len(unified_view))
+
+    # Base discovery/search grain.
+    search = build_search(s16, s20, master)
+
+    # Convergence layer:
+    # Financial Intelligence + Company Intelligence State +
+    # Investment Signals + Decision Intelligence.
+    search = enrich_with_unified_company_view(search, unified_view)
+
+    # Screening must be derived only after convergence-layer enrichment.
+    screening = build_screening(search)
+
+    exceptions = validate_search(search)
+
+    exceptions += reconcile(
+        search,
+        s16,
+        [
+            "company_name",
+            "financial_health",
+            "financial_risk_signal",
+            "financial_trajectory",
+            "peer_position",
+            "peer_population_class",
+            "decision_posture",
+            "decision_priority",
+            "decision_confidence",
+            "decision_reason_code",
+            "company_archetype",
+            "profile_quality",
+        ],
+        "STEP16_RECONCILIATION",
+    )
+
+    exceptions += reconcile(
+        search,
+        s20,
+        [
+            "financial_decision",
+            "financial_trajectory",
+            "financial_score",
+            "funding_status",
+            "funding_event_count",
+            "sec_exempt_offering_capital_usd",
+            "investor_coverage_status",
+            "named_investor_count",
+            "ownership_status",
+            "ownership_pct_available",
+            "valuation_status",
+            "latest_valuation_amount_usd",
+            "data_coverage",
+            "unified_posture",
+        ],
+        "STEP20_RECONCILIATION",
+    )
+
+    # Final convergence check: Step 21 must agree with the authoritative
+    # Unified Company View on its pass-through financial/investment fields.
+    exceptions += reconcile(
+        search,
+        unified_view,
+        [
+            "company_name",
+            "financial_decision",
+            "financial_score",
+            "financial_trajectory",
+            "unified_posture",
+            "data_coverage",
+        ],
+        "UNIFIED_COMPANY_VIEW_RECONCILIATION",
+    )
+
+    warnings: list[str] = []
+
+    if not search["has_investor_data"].any():
+        warnings.append(
+            "Named investor enrichment unavailable; investor identity remains NO_DATA."
+        )
+
+    if not search["has_valuation_data"].any():
+        warnings.append(
+            "Valuation enrichment unavailable; valuation remains NO_DATA."
+        )
+
+    if search["has_funding_data"].any():
+        warnings.append(
+            "Funding coverage is SEC Form D based and is not complete "
+            "private-company funding history."
+        )
+
+    out = {
+        "master": args.output / "company_master" / "company_master.parquet",
+        "search": args.output / "company_search" / "company_search.parquet",
+        "screening": args.output / "company_screening" / "company_screening.parquet",
+        "summary": args.output / "company_intelligence_summary" / "company_intelligence_summary.parquet",
+        "lineage": args.output / "company_intelligence_lineage" / "company_intelligence_lineage.parquet",
+        "exceptions": args.output / "company_intelligence_exceptions" / "company_intelligence_exceptions.parquet",
+        "promotion": args.output / "company_intelligence_promotion" / "company_intelligence_promotion.parquet",
+    }
+
+    write(
+        master.assign(
+            step21_version=STEP21_VERSION,
+            generated_at_utc=now(),
+        ),
+        out["master"],
+    )
+    write(search, out["search"])
+    write(screening, out["screening"])
+    write(summary(search, screening), out["summary"])
+    write(lineage(), out["lineage"])
+
+    exc = pd.DataFrame(
+        exceptions,
+        columns=["check_name", "severity", "message", "cik"],
+    )
+    if exc.empty:
+        exc = pd.DataFrame(
+            columns=["check_name", "severity", "message", "cik"]
+        )
+
+    exc["step21_version"] = STEP21_VERSION
+    exc["generated_at_utc"] = now()
+    write(exc, out["exceptions"])
+
+    fatal = int((exc["severity"] == "FATAL").sum())
+
+    # region agent log
+    _debug_log(
+        "A",
+        "step_21_company_discovery_screening.py:main",
+        "step21 promotion gate",
+        {
+            "fatal": fatal,
+            "checks": exc.groupby("check_name").size().astype(int).to_dict() if not exc.empty else {},
+            "companies": int(search.cik.nunique()),
+        },
+    )
+    # endregion
+
+    promotion = pd.DataFrame(
+        [
+            {
+                "step": "STEP_21",
+                "step21_version": STEP21_VERSION,
+                "promotion_decision": "BLOCKED" if fatal else "PROMOTE",
+                "company_count": int(search.cik.nunique()),
+                "fatal_exception_count": fatal,
+                "warning_count": len(warnings),
+                "new_financial_score_created": False,
+                "new_ranking_created": False,
+                "funding_stage_inference_prevented": True,
+                "investor_identity_inference_prevented": True,
+                "ownership_inference_prevented": True,
+                "valuation_inference_prevented": True,
+                "sec_capital_separate_from_valuation": True,
+                "unified_company_view_consumed": True,
+                "generated_at_utc": now(),
+            }
+        ]
+    )
+    write(promotion, out["promotion"])
+
+    logger.info("Configured companies : %d", search.cik.nunique())
+    logger.info("Company search rows  : %d", len(search))
+    logger.info("Screening rows       : %d", len(screening))
+    logger.info(
+        "ELIGIBLE             : %d",
+        (search.screening_eligibility == "ELIGIBLE").sum(),
+    )
+    logger.info(
+        "LIMITED              : %d",
+        (search.screening_eligibility == "LIMITED").sum(),
+    )
+    logger.info(
+        "INSUFFICIENT_DATA    : %d",
+        (search.screening_eligibility == "INSUFFICIENT_DATA").sum(),
+    )
+    logger.info(
+        "Event decision POSITIVE: %d",
+        (search.event_decision_posture.map(upper) == "POSITIVE").sum(),
+    )
+    logger.info(
+        "Investment signals   : %d",
+        int(
+            pd.to_numeric(
+                search.investment_signal_count,
+                errors="coerce",
+            )
+            .fillna(0)
+            .sum()
+        ),
+    )
+    logger.info("Fatal failures       : %d", fatal)
+    logger.info("Controlled warnings  : %d", len(warnings))
+    logger.info(
+        "Promotion decision   : %s",
+        "BLOCKED" if fatal else "PROMOTE",
+    )
+
+    for warning in warnings:
+        logger.warning(warning)
+
+    logger.info("Company search : %s", out["search"])
+    logger.info("Company screening : %s", out["screening"])
+
+    if fatal:
+        raise RuntimeError(
+            f"Step 21 blocked promotion with {fatal} fatal DQ failure(s)."
+        )
+
+    logger.info("=" * 80)
+    logger.info("STEP 21 PASS")
+    logger.info("=" * 80)
+
+
+if __name__ == "__main__":
+    main()

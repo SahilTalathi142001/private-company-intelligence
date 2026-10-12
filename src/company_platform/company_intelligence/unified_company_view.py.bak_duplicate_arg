@@ -1,0 +1,1096 @@
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+import pandas as pd
+
+from company_platform.company_intelligence.company_state_store import (
+    CompanyStateStore,
+)
+from company_platform.registry.active_company_scope import load_active_company_ciks
+
+from company_platform.investment_intelligence.signal_engine import (
+    InvestmentSignalStore,
+)
+
+from company_platform.investment_intelligence.decision_engine import (
+    DecisionSignalStore,
+)
+
+
+UNIFIED_COMPANY_VIEW_VERSION = "1.1.0"
+
+
+ROOT = Path(__file__).resolve().parents[3]
+DATA_ROOT = ROOT / "data"
+
+STEP16_PROFILE = (
+    DATA_ROOT
+    / "gold"
+    / "financial_company_intelligence"
+    / "company_intelligence_profile"
+    / "company_intelligence_profile.parquet"
+)
+
+STEP20_PROFILE = (
+    DATA_ROOT
+    / "gold"
+    / "unified_investment_intelligence"
+    / "investment_profile"
+    / "investment_profile.parquet"
+)
+
+COMPANY_MASTER = (
+    DATA_ROOT
+    / "silver"
+    / "company"
+    / "company.parquet"
+)
+
+OUTPUT_ROOT = (
+    DATA_ROOT
+    / "gold"
+    / "unified_company_intelligence"
+)
+
+
+def utc_now() -> str:
+    return datetime.now(
+        timezone.utc
+    ).isoformat()
+
+
+def normalize_cik(value: Any) -> str:
+    if value is None:
+        return ""
+
+    try:
+        if pd.isna(value):
+            return ""
+    except Exception:
+        pass
+
+    text = str(value).strip()
+
+    if text.endswith(".0"):
+        text = text[:-2]
+
+    digits = "".join(
+        char
+        for char in text
+        if char.isdigit()
+    )
+
+    return digits.zfill(10) if digits else ""
+
+
+def clean_text(value: Any) -> str | None:
+    if value is None:
+        return None
+
+    try:
+        if pd.isna(value):
+            return None
+    except Exception:
+        pass
+
+    value = " ".join(
+        str(value).split()
+    ).strip()
+
+    return value or None
+
+
+def upper(value: Any) -> str | None:
+    value = clean_text(value)
+
+    return (
+        value.upper()
+        if value
+        else None
+    )
+
+
+def number(value: Any) -> float | None:
+    if value is None:
+        return None
+
+    try:
+        if pd.isna(value):
+            return None
+
+        return float(value)
+
+    except (TypeError, ValueError):
+        return None
+
+
+def integer(value: Any) -> int | None:
+    value = number(value)
+
+    return (
+        int(value)
+        if value is not None
+        else None
+    )
+
+
+def merged_value(
+    row: pd.Series,
+    column: str,
+    preferred_suffix: str,
+) -> Any:
+    other_suffix = (
+        "investment"
+        if preferred_suffix == "financial"
+        else "financial"
+    )
+
+    for key in (
+        f"{column}_{preferred_suffix}",
+        column,
+        f"{column}_{other_suffix}",
+    ):
+        value = row.get(key)
+
+        if value is None:
+            continue
+
+        try:
+            if pd.isna(value):
+                continue
+        except (TypeError, ValueError):
+            pass
+
+        return value
+
+    return None
+
+
+def boolean(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+
+    if value is None:
+        return None
+
+    try:
+        if pd.isna(value):
+            return None
+    except Exception:
+        pass
+
+    value = str(value).strip().lower()
+
+    if value in {
+        "true",
+        "1",
+        "yes",
+        "y",
+    }:
+        return True
+
+    if value in {
+        "false",
+        "0",
+        "no",
+        "n",
+    }:
+        return False
+
+    return None
+
+
+def read_required(
+    path: Path,
+    label: str,
+) -> pd.DataFrame:
+
+    if not path.exists():
+        raise FileNotFoundError(
+            f"{label} not found: {path}"
+        )
+
+    frame = pd.read_parquet(path)
+
+    if frame.empty:
+        raise ValueError(
+            f"{label} is empty: {path}"
+        )
+
+    return frame
+
+
+def validate_unique_cik(
+    frame: pd.DataFrame,
+    label: str,
+) -> None:
+
+    if "cik" not in frame.columns:
+        raise ValueError(
+            f"{label} missing cik column."
+        )
+
+    frame = frame.copy()
+
+    frame["cik"] = (
+        frame["cik"]
+        .map(normalize_cik)
+    )
+
+    if frame["cik"].eq("").any():
+        raise ValueError(
+            f"{label} contains blank CIK."
+        )
+
+    if frame["cik"].duplicated().any():
+        raise ValueError(
+            f"{label} contains duplicate CIKs."
+        )
+
+
+def prepare_company_master(
+    frame: pd.DataFrame,
+) -> pd.DataFrame:
+    if "cik" not in frame.columns:
+        raise ValueError(
+            "Company master missing cik column."
+        )
+
+    master = frame.copy()
+    master["cik"] = master["cik"].map(normalize_cik)
+
+    if master["cik"].eq("").any():
+        raise ValueError(
+            "Company master contains blank CIK."
+        )
+
+    rows = []
+
+    for cik, group in master.groupby("cik", sort=False):
+        row = {"cik": cik}
+
+        tickers = sorted(
+            {
+                ticker
+                for ticker in (
+                    clean_text(value)
+                    for value in group.get(
+                        "ticker",
+                        pd.Series(dtype=object),
+                    )
+                )
+                if ticker
+            },
+            key=str.casefold,
+        )
+        row["ticker"] = tickers[0] if len(tickers) == 1 else None
+        row["tickers"] = "|".join(tickers) if tickers else None
+
+        for column in master.columns:
+            if column in {"cik", "ticker"}:
+                continue
+
+            values = group[column].dropna()
+            distinct = {}
+
+            for value in values:
+                normalized = clean_text(value)
+                if normalized:
+                    distinct.setdefault(normalized, value)
+
+            if len(distinct) > 1:
+                raise ValueError(
+                    "Company master has conflicting "
+                    f"{column} values for CIK {cik}."
+                )
+
+            row[column] = next(iter(distinct.values()), None)
+
+        rows.append(row)
+
+    return pd.DataFrame(rows)
+
+
+class UnifiedCompanyViewBuilder:
+    """
+    Builds one company-grain view across:
+
+        Financial Intelligence
+        Investment Intelligence
+        Company Intelligence State
+        Investment Signals
+        Decision Signals
+
+    This layer does not create a new financial score.
+
+    It also does not infer:
+        - valuation
+        - ownership
+        - investor identity
+        - funding stage
+    """
+
+    def __init__(
+        self,
+        *,
+        state_store=None,
+        signal_store=None,
+        decision_store=None,
+    ):
+
+        self.state_store = (
+            state_store
+            or CompanyStateStore()
+        )
+
+        self.signal_store = (
+            signal_store
+            or InvestmentSignalStore()
+        )
+
+        self.decision_store = (
+            decision_store
+            or DecisionSignalStore()
+        )
+
+    def build(
+        self,
+        *,
+        step16_path: Path = STEP16_PROFILE,
+        step20_path: Path = STEP20_PROFILE,
+        company_master_path: Path = COMPANY_MASTER,
+        only_cik: str | None = None,
+        expected_universe_ciks: set[str] | None = None,
+        expected_universe_ciks: set[str] | None = None,
+        expected_universe_ciks: set[str] | None = None,
+        expected_universe_ciks: set[str] | None = None,
+        expected_universe_ciks: set[str] | None = None,
+        expected_universe_ciks: set[str] | None = None,
+    ) -> pd.DataFrame:
+
+        step16 = read_required(
+            step16_path,
+            "Step 16 company intelligence profile",
+        )
+
+        step20 = read_required(
+            step20_path,
+            "Step 20 investment profile",
+        )
+
+        master = read_required(
+            company_master_path,
+            "Company master",
+        )
+
+        validate_unique_cik(
+            step16,
+            "Step 16",
+        )
+
+        validate_unique_cik(
+            step20,
+            "Step 20",
+        )
+
+        step16 = step16.copy()
+        step20 = step20.copy()
+        master = prepare_company_master(master)
+
+        step16["cik"] = (
+            step16["cik"]
+            .map(normalize_cik)
+        )
+
+        step20["cik"] = (
+            step20["cik"]
+            .map(normalize_cik)
+        )
+
+        master["cik"] = (
+            master["cik"]
+            .map(normalize_cik)
+        )
+
+        if expected_universe_ciks is None:
+            expected_universe = set(load_active_company_ciks())
+        else:
+            expected_universe = {
+                normalize_cik(cik)
+                for cik in expected_universe_ciks
+                if normalize_cik(cik)
+            }
+            if not expected_universe:
+                raise ValueError(
+                    "expected_universe_ciks must contain at least one valid CIK."
+                )
+
+        master = master[master["cik"].isin(expected_universe)].copy()
+
+        financial_universe = set(step16["cik"])
+        investment_universe = set(step20["cik"])
+
+        if financial_universe != expected_universe:
+            raise ValueError(
+                "Step 16 company universe does not match the active registry: "
+                f"missing={sorted(expected_universe - financial_universe)}; "
+                f"extra={sorted(financial_universe - expected_universe)}"
+            )
+
+        if investment_universe != expected_universe:
+            raise ValueError(
+                "Step 20 company universe does not match the active registry: "
+                f"missing={sorted(expected_universe - investment_universe)}; "
+                f"extra={sorted(investment_universe - expected_universe)}"
+            )
+
+        merged = step20.merge(
+            step16,
+            on="cik",
+            how="inner",
+            suffixes=(
+                "_investment",
+                "_financial",
+            ),
+            validate="one_to_one",
+        )
+
+        merged = merged.merge(
+            master,
+            on="cik",
+            how="left",
+            suffixes=(
+                "",
+                "_master",
+            ),
+            validate="one_to_one",
+        )
+
+        if only_cik is not None:
+            target = normalize_cik(only_cik)
+            merged = merged[merged["cik"] == target].copy()
+            if merged.empty:
+                raise ValueError(f"No active company row found for CIK {target}.")
+
+        rows = []
+
+        for _, row in merged.iterrows():
+
+            cik = normalize_cik(
+                row["cik"]
+            )
+
+            company_id = (
+                f"SEC_{cik}"
+            )
+
+            state = (
+                self.state_store.get(
+                    company_id
+                )
+            )
+
+            if state is None:
+                state_status = "NO_DATA"
+
+                state_version = None
+
+                funding_event_count = 0
+
+                latest_funding_date = None
+
+                latest_total_offering = None
+
+                latest_amount_sold = None
+
+                cumulative_offering = None
+
+                cumulative_sold = None
+
+                state_source_event = None
+                state_source_run = None
+                state_source_document = None
+                state_source_sha = None
+
+            else:
+                state_status = (
+                    state["status"]
+                )
+
+                state_version = integer(
+                    state["state_version"]
+                )
+
+                funding_event_count = integer(
+                    state["funding_event_count"]
+                )
+
+                latest_funding_date = (
+                    state["latest_funding_date"]
+                )
+
+                latest_total_offering = number(
+                    state[
+                        "latest_total_offering_amount"
+                    ]
+                )
+
+                latest_amount_sold = number(
+                    state[
+                        "latest_total_amount_sold"
+                    ]
+                )
+
+                cumulative_offering = number(
+                    state[
+                        "cumulative_offering_amount"
+                    ]
+                )
+
+                cumulative_sold = number(
+                    state[
+                        "cumulative_amount_sold"
+                    ]
+                )
+
+                state_source_event = (
+                    state["last_source_event_id"]
+                )
+
+                state_source_run = (
+                    state["last_source_run_id"]
+                )
+
+                state_source_document = (
+                    state["last_source_document_id"]
+                )
+
+                state_source_sha = (
+                    state[
+                        "last_source_document_sha256"
+                    ]
+                )
+
+            signals = (
+                self.signal_store
+                .list_for_company(
+                    company_id
+                )
+            )
+
+            if state_version is not None:
+                current_signals = [
+                    signal
+                    for signal in signals
+                    if int(
+                        signal[
+                            "source_state_version"
+                        ]
+                    ) == state_version
+                ]
+            else:
+                current_signals = []
+
+            signal_types = sorted(
+                {
+                    signal[
+                        "signal_type"
+                    ]
+                    for signal
+                    in current_signals
+                }
+            )
+
+            decisions = (
+                self.decision_store
+                .list_for_company(
+                    company_id
+                )
+            )
+
+            if state_version is not None:
+                current_decisions = [
+                    decision
+                    for decision in decisions
+                    if int(
+                        decision[
+                            "source_state_version"
+                        ]
+                    ) == state_version
+                ]
+            else:
+                current_decisions = []
+
+            posture = None
+            posture_confidence = None
+            decision_id = None
+
+            if current_decisions:
+
+                latest_decision = (
+                    current_decisions[-1]
+                )
+
+                posture = upper(
+                    latest_decision[
+                        "decision_value"
+                    ]
+                )
+
+                posture_confidence = upper(
+                    latest_decision[
+                        "confidence"
+                    ]
+                )
+
+                decision_id = (
+                    latest_decision[
+                        "decision_id"
+                    ]
+                )
+
+            rows.append(
+                {
+                    # ------------------------------------------------------
+                    # Identity
+                    # ------------------------------------------------------
+
+                    "cik": cik,
+
+                    "company_id": company_id,
+
+                    "company_name": (
+                        clean_text(
+                            row.get(
+                                "company_name_master"
+                            )
+                        )
+                        or clean_text(
+                            row.get(
+                                "company_name_financial"
+                            )
+                        )
+                        or clean_text(
+                            row.get(
+                                "company_name_investment"
+                            )
+                        )
+                        or cik
+                    ),
+
+                    "ticker": clean_text(
+                        row.get("ticker_master", row.get("ticker"))
+                    ),
+
+                    "tickers": clean_text(
+                        row.get("tickers_master", row.get("tickers"))
+                    ),
+
+                    "industry": clean_text(
+                        row.get(
+                            "industry_master"
+                        )
+                    ),
+
+                    "founded_year": integer(
+                        row.get(
+                            "founded_year_master"
+                        )
+                    ),
+
+                    "headquarters": clean_text(
+                        row.get(
+                            "headquarters_master"
+                        )
+                    ),
+
+                    "company_status": (
+                        clean_text(
+                            row.get(
+                                "company_status_master"
+                            )
+                        )
+                        or clean_text(
+                            row.get(
+                                "status_master"
+                            )
+                        )
+                    ),
+
+                    # ------------------------------------------------------
+                    # Financial Intelligence
+                    # ------------------------------------------------------
+
+                    "financial_decision": upper(
+                        row.get(
+                            "financial_decision"
+                        )
+                    ),
+
+                    "financial_trajectory": upper(
+                        row.get(
+                            "financial_trajectory_investment"
+                        )
+                        or row.get(
+                            "financial_trajectory"
+                        )
+                    ),
+
+                    "financial_score": number(
+                        row.get(
+                            "financial_score"
+                        )
+                    ),
+
+                    "financial_health": upper(
+                        merged_value(
+                            row,
+                            "financial_health",
+                            "financial",
+                        )
+                    ),
+
+                    "financial_risk_signal": upper(
+                        merged_value(
+                            row,
+                            "financial_risk_signal",
+                            "financial",
+                        )
+                    ),
+
+                    "financial_peer_position": upper(
+                        merged_value(
+                            row,
+                            "peer_position",
+                            "financial",
+                        )
+                    ),
+
+                    "financial_decision_confidence": upper(
+                        merged_value(
+                            row,
+                            "decision_confidence",
+                            "financial",
+                        )
+                    ),
+
+                    "financial_decision_priority": integer(
+                        merged_value(
+                            row,
+                            "decision_priority",
+                            "financial",
+                        )
+                    ),
+
+                    "financial_decision_reason_code": upper(
+                        merged_value(
+                            row,
+                            "decision_reason_code",
+                            "financial",
+                        )
+                    ),
+
+                    "company_archetype": upper(
+                        merged_value(
+                            row,
+                            "company_archetype",
+                            "financial",
+                        )
+                    ),
+
+                    # ------------------------------------------------------
+                    # Existing Step 20 intelligence
+                    # ------------------------------------------------------
+
+                    "step20_unified_posture": upper(
+                        row.get(
+                            "unified_posture"
+                        )
+                    ),
+
+                    "step20_data_coverage": upper(
+                        row.get(
+                            "data_coverage"
+                        )
+                    ),
+
+                    "funding_status_step20": upper(
+                        row.get(
+                            "funding_status"
+                        )
+                    ),
+
+                    "investor_coverage_status": upper(
+                        row.get(
+                            "investor_coverage_status"
+                        )
+                    ),
+
+                    "named_investor_count": integer(
+                        row.get(
+                            "named_investor_count"
+                        )
+                    ),
+
+                    "ownership_status": upper(
+                        row.get(
+                            "ownership_status"
+                        )
+                    ),
+
+                    "valuation_status": upper(
+                        row.get(
+                            "valuation_status"
+                        )
+                    ),
+
+                    "latest_valuation_amount_usd": number(
+                        row.get(
+                            "latest_valuation_amount_usd"
+                        )
+                    ),
+
+                    "latest_valuation_date": (
+                        row.get(
+                            "latest_valuation_date"
+                        )
+                    ),
+
+                    "sec_capital_context_usd": number(
+                        row.get(
+                            "sec_capital_context_usd"
+                        )
+                    ),
+
+                    "sec_capital_treated_as_valuation": boolean(
+                        row.get(
+                            "sec_capital_treated_as_valuation"
+                        )
+                    ),
+
+                    "valuation_fabrication_prevented": boolean(
+                        row.get(
+                            "valuation_fabrication_prevented"
+                        )
+                    ),
+
+                    # ------------------------------------------------------
+                    # Event-driven Company Intelligence
+                    # ------------------------------------------------------
+
+                    "company_state_status": state_status,
+
+                    "company_state_version": state_version,
+
+                    "observed_funding_event_count": (
+                        funding_event_count
+                    ),
+
+                    "latest_funding_date": (
+                        latest_funding_date
+                    ),
+
+                    "latest_total_offering_amount_usd": (
+                        latest_total_offering
+                    ),
+
+                    "latest_amount_sold_usd": (
+                        latest_amount_sold
+                    ),
+
+                    "cumulative_offering_amount_usd": (
+                        cumulative_offering
+                    ),
+
+                    "cumulative_amount_sold_usd": (
+                        cumulative_sold
+                    ),
+
+                    # ------------------------------------------------------
+                    # Investment Signals
+                    # ------------------------------------------------------
+
+                    "investment_signal_count": len(
+                        current_signals
+                    ),
+
+                    "investment_signal_types": (
+                        "|".join(
+                            signal_types
+                        )
+                        if signal_types
+                        else None
+                    ),
+
+                    "capital_activity_detected": (
+                        "CAPITAL_ACTIVITY_DETECTED"
+                        in signal_types
+                    ),
+
+                    "recurring_capital_activity": (
+                        "RECURRING_CAPITAL_ACTIVITY"
+                        in signal_types
+                    ),
+
+                    "capital_raise_execution": (
+                        "CAPITAL_RAISE_EXECUTION"
+                        in signal_types
+                    ),
+
+                    # ------------------------------------------------------
+                    # Decision Intelligence
+                    # ------------------------------------------------------
+
+                    "event_decision_posture": posture,
+
+                    "event_decision_confidence": (
+                        posture_confidence
+                    ),
+
+                    "event_decision_id": decision_id,
+
+                    # ------------------------------------------------------
+                    # Unified evidence
+                    # ------------------------------------------------------
+
+                    "source_event_id": (
+                        state_source_event
+                    ),
+
+                    "source_run_id": (
+                        state_source_run
+                    ),
+
+                    "source_document_id": (
+                        state_source_document
+                    ),
+
+                    "source_document_sha256": (
+                        state_source_sha
+                    ),
+
+                    "unified_company_view_version": (
+                        UNIFIED_COMPANY_VIEW_VERSION
+                    ),
+
+                    "generated_at_utc": utc_now(),
+                }
+            )
+
+        result = pd.DataFrame(
+            rows
+        )
+
+        if result.empty:
+            raise ValueError(
+                "Unified company view is empty."
+            )
+
+        if result["cik"].duplicated().any():
+            raise ValueError(
+                "Unified company view must contain "
+                "exactly one row per CIK."
+            )
+
+        return (
+            result
+            .sort_values(
+                ["company_name", "cik"]
+            )
+            .reset_index(drop=True)
+        )
+
+    def write(
+        self,
+        frame: pd.DataFrame,
+        path: Path | None = None,
+    ) -> Path:
+
+        if path is None:
+            path = (
+                OUTPUT_ROOT
+                / "unified_company_view"
+                / "unified_company_view.parquet"
+            )
+
+        path.parent.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        frame.to_parquet(
+            path,
+            index=False,
+        )
+
+        return path
+
+    def build_and_write(
+        self,
+        **kwargs,
+    ) -> tuple[pd.DataFrame, Path]:
+
+        frame = self.build(
+            **kwargs
+        )
+
+        path = self.write(
+            frame
+        )
+
+        return frame, path
+    def upsert_company(
+        self,
+        cik: str,
+        *,
+        step16_path: Path = STEP16_PROFILE,
+        step20_path: Path = STEP20_PROFILE,
+        company_master_path: Path = COMPANY_MASTER,
+        path: Path | None = None,
+    ) -> tuple[pd.DataFrame, Path]:
+        """Refresh one company while preserving a validated active universe."""
+        expected = set(load_active_company_ciks())
+        output = path or (
+            OUTPUT_ROOT / "unified_company_view" / "unified_company_view.parquet"
+        )
+        if not output.exists():
+            return self.build_and_write(
+                step16_path=step16_path,
+                step20_path=step20_path,
+                company_master_path=company_master_path,
+            )
+
+        existing = pd.read_parquet(output)
+        existing_ciks = set(
+            existing.get("cik", pd.Series(dtype=object)).map(normalize_cik)
+        )
+        # Never merge the legacy 5-company artifact into the active universe.
+        if existing_ciks != expected:
+            return self.build_and_write(
+                step16_path=step16_path,
+                step20_path=step20_path,
+                company_master_path=company_master_path,
+            )
+
+        # The canonical build remains the source of truth for field semantics.
+        # The persisted write is then narrowed to the affected company.
+        target = normalize_cik(cik)
+        full = self.build(
+            step16_path=step16_path,
+            step20_path=step20_path,
+            company_master_path=company_master_path,
+            only_cik=target,
+        )
+        if target not in expected:
+            raise ValueError(f"CIK {target} is not in the active company universe.")
+        replacement = full[full["cik"].map(normalize_cik) == target].copy()
+        if replacement.empty:
+            raise ValueError(f"UCV build did not produce active company {target}.")
+        updated = existing[existing["cik"].map(normalize_cik) != target].copy()
+        updated = pd.concat([updated, replacement], ignore_index=True)
+        updated = updated.sort_values(["company_name", "cik"]).reset_index(drop=True)
+        self.write(updated, output)
+        return updated, output

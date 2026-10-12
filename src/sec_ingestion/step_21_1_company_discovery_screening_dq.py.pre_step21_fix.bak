@@ -1,0 +1,1939 @@
+"""
+STEP 21.1 - COMPANY DISCOVERY / SCREENING DATA QUALITY
+Version: 21.1.0
+
+Standalone DQ layer for Step 21 Company Discovery / Screening.
+
+Audits:
+    1. Step/version compatibility
+    2. Required artifact presence and schema
+    3. Company-master configured-universe coverage
+    4. One-row-per-CIK grain
+    5. Identity integrity
+    6. Allowed vocabulary
+    7. Screening eligibility determinism
+    8. Boolean filter determinism
+    9. Step 16 reconciliation
+   10. Step 20 reconciliation
+   11. Step 20 signal integrity / universe coverage
+   12. Financial score preservation / no new score
+   13. No ranking creation
+   14. SEC capital != valuation
+   15. Valuation fabrication prevention
+   16. Funding-stage inference prevention
+   17. Investor-identity inference prevention
+   18. Ownership inference prevention
+   19. Summary reconciliation
+   20. Lineage reconciliation
+   21. Promotion gating
+
+Fatal integrity failures BLOCK promotion.
+Known source-coverage limitations remain controlled warnings.
+"""
+
+from __future__ import annotations
+
+import argparse
+import logging
+import math
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+import pandas as pd
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# =============================================================================
+# VERSION / PATHS
+# =============================================================================
+
+STEP21_DQ_VERSION = "21.1.0"
+STEP21_VERSION_EXPECTED = "21.0.0"
+STEP16_VERSION_EXPECTED = "1.1.0"
+STEP20_VERSION_EXPECTED = "20.0.0"
+
+ROOT = Path(__file__).resolve().parents[2]
+DATA = ROOT / "data"
+
+STEP16_ROOT = DATA / "gold" / "financial_company_intelligence"
+STEP20_ROOT = DATA / "gold" / "unified_investment_intelligence"
+STEP21_ROOT = DATA / "gold" / "company_intelligence"
+COMPANY_MASTER = DATA / "silver" / "company" / "company.parquet"
+
+STEP16_PROFILE = (
+    STEP16_ROOT / "company_intelligence_profile"
+    / "company_intelligence_profile.parquet"
+)
+STEP20_PROFILE = (
+    STEP20_ROOT / "investment_profile"
+    / "investment_profile.parquet"
+)
+STEP20_SIGNALS = (
+    STEP20_ROOT / "investment_signals"
+    / "investment_signals.parquet"
+)
+
+STEP21_SEARCH = STEP21_ROOT / "company_search" / "company_search.parquet"
+STEP21_SCREENING = STEP21_ROOT / "company_screening" / "company_screening.parquet"
+STEP21_SUMMARY = (
+    STEP21_ROOT / "company_intelligence_summary"
+    / "company_intelligence_summary.parquet"
+)
+STEP21_LINEAGE = (
+    STEP21_ROOT / "company_intelligence_lineage"
+    / "company_intelligence_lineage.parquet"
+)
+STEP21_PROMOTION = (
+    STEP21_ROOT / "company_intelligence_promotion"
+    / "company_intelligence_promotion.parquet"
+)
+
+OUTPUT = DATA / "gold" / "company_intelligence_dq"
+
+VALID_DECISIONS = {"CAUTION", "WATCH", "NEUTRAL", "POSITIVE"}
+VALID_TRAJECTORIES = {"IMPROVING", "MIXED", "DETERIORATING"}
+VALID_POSTURES = {
+    "STRONG_POSITIVE",
+    "POSITIVE",
+    "NEUTRAL",
+    "WATCH",
+    "CAUTION",
+    "INSUFFICIENT_DATA",
+}
+VALID_COVERAGE = {"COMPLETE", "PARTIAL", "LIMITED", "NO_DATA"}
+VALID_ELIGIBILITY = {"ELIGIBLE", "LIMITED", "INSUFFICIENT_DATA"}
+VALID_HEALTH = {"EXCELLENT", "STRONG", "HEALTHY", "NEUTRAL", "WEAK", "POOR", None}
+VALID_RISK = {"LOW", "MODERATE", "HIGH", None}
+VALID_PROFILE_QUALITY = {
+    "COMPLETE",
+    "PARTIAL",
+    "PARTIAL_FEATURE_DATA",
+    "PARTIAL_DECISION_DATA",
+    "PARTIAL_IDENTITY_DATA",
+    "PARTIAL_UPSTREAM_DATA",
+    "LIMITED",
+    None,
+}
+VALID_COVERAGE_STATUS = {"AVAILABLE", "PARTIAL", "NO_DATA", None}
+
+REQUIRED_SEARCH = {
+    "cik",
+    "company_name",
+    "financial_decision",
+    "financial_trajectory",
+    "financial_score",
+    "financial_health",
+    "financial_risk_signal",
+    "peer_position",
+    "peer_population_class",
+    "decision_confidence",
+    "decision_priority",
+    "decision_reason_code",
+    "company_archetype",
+    "funding_status",
+    "funding_event_count",
+    "sec_exempt_offering_capital_usd",
+    "funding_activity_status",
+    "investor_coverage_status",
+    "named_investor_count",
+    "ownership_status",
+    "ownership_pct_available",
+    "valuation_status",
+    "latest_valuation_amount_usd",
+    "latest_valuation_date",
+    "sec_capital_context_usd",
+    "sec_capital_treated_as_valuation",
+    "valuation_fabrication_prevented",
+    "data_coverage",
+    "unified_posture",
+    "profile_quality",
+    "screening_eligibility",
+    "is_strong_positive",
+    "is_positive",
+    "is_improving",
+    "is_low_risk",
+    "has_funding_data",
+    "has_investor_data",
+    "has_valuation_data",
+    "has_complete_data",
+    "step16_version",
+    "step20_version",
+    "step21_version",
+}
+
+REQUIRED_SCREENING = {
+    "cik",
+    "company_name",
+    "screening_eligibility",
+    "unified_posture",
+    "financial_decision",
+    "financial_trajectory",
+    "financial_score",
+    "financial_risk_signal",
+    "funding_status",
+    "valuation_status",
+    "data_coverage",
+    "is_strong_positive",
+    "is_positive",
+    "is_improving",
+    "is_low_risk",
+    "has_funding_data",
+    "has_investor_data",
+    "has_valuation_data",
+    "has_complete_data",
+    "step21_version",
+}
+
+REQUIRED_STEP16 = {
+    "cik",
+    "company_name",
+    "financial_health",
+    "financial_risk_signal",
+    "financial_trajectory",
+    "peer_position",
+    "peer_population_class",
+    "decision_posture",
+    "decision_priority",
+    "decision_confidence",
+    "decision_reason_code",
+    "company_archetype",
+    "profile_quality",
+    "profile_version",
+}
+
+REQUIRED_STEP20 = {
+    "cik",
+    "financial_decision",
+    "financial_trajectory",
+    "financial_score",
+    "funding_status",
+    "funding_event_count",
+    "sec_exempt_offering_capital_usd",
+    "funding_activity_status",
+    "investor_coverage_status",
+    "named_investor_count",
+    "ownership_status",
+    "ownership_pct_available",
+    "valuation_status",
+    "latest_valuation_amount_usd",
+    "latest_valuation_date",
+    "sec_capital_context_usd",
+    "sec_capital_treated_as_valuation",
+    "valuation_fabrication_prevented",
+    "data_coverage",
+    "unified_posture",
+    "step20_version",
+}
+
+REQUIRED_SIGNALS = {
+    "cik",
+    "signal_type",
+    "signal_status",
+    "step20_version",
+}
+
+REQUIRED_SUMMARY = {
+    "step",
+    "step21_version",
+    "configured_company_count",
+    "company_search_rows",
+    "screening_rows",
+    "strong_positive_count",
+    "positive_count",
+    "neutral_count",
+    "watch_count",
+    "caution_count",
+    "insufficient_data_count",
+    "eligible_count",
+    "limited_count",
+    "insufficient_screening_count",
+    "complete_data_count",
+    "partial_data_count",
+    "limited_data_count",
+    "no_data_count",
+    "new_financial_score_created",
+    "new_ranking_created",
+    "funding_stage_inference",
+    "investor_identity_inference",
+    "ownership_inference",
+    "valuation_inference",
+    "sec_capital_treated_as_valuation",
+}
+
+REQUIRED_LINEAGE = {
+    "output_field",
+    "source",
+    "transformation",
+    "step21_version",
+    "new_financial_score_created",
+}
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s",
+)
+logger = logging.getLogger("step21_dq")
+
+
+# =============================================================================
+# HELPERS
+# =============================================================================
+
+def now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def cik(value: Any) -> str:
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except Exception:
+        pass
+
+    value = str(value).strip()
+    if value.endswith(".0"):
+        value = value[:-2]
+
+    digits = "".join(x for x in value if x.isdigit())
+    return digits.zfill(10) if digits else ""
+
+
+def text(value: Any) -> str | None:
+    if value is None:
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except Exception:
+        pass
+
+    value = " ".join(str(value).split()).strip()
+    if value.lower() in {"", "nan", "none", "<na>", "nat"}:
+        return None
+    return value
+
+
+def upper(value: Any) -> str | None:
+    value = text(value)
+    return value.upper() if value else None
+
+
+def number(value: Any) -> float | None:
+    try:
+        if value is None or pd.isna(value):
+            return None
+        value = float(value)
+        return value if math.isfinite(value) else None
+    except (TypeError, ValueError):
+        return None
+
+
+def integer(value: Any) -> int | None:
+    value = number(value)
+    return int(value) if value is not None else None
+
+
+def boolean(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    try:
+        if pd.isna(value):
+            return False
+    except Exception:
+        pass
+    return str(value).strip().upper() in {"TRUE", "1", "YES", "Y"}
+
+
+def nullable_boolean(value: Any) -> bool | None:
+    if value is None:
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except Exception:
+        pass
+    return boolean(value)
+
+
+def read(path: Path, label: str) -> pd.DataFrame:
+    if not path.exists():
+        raise FileNotFoundError(f"{label} not found: {path}")
+
+    df = pd.read_parquet(path)
+    if not isinstance(df, pd.DataFrame):
+        raise TypeError(f"{label} is not a DataFrame: {path}")
+    return df
+
+
+def require(df: pd.DataFrame, columns: set[str], label: str) -> None:
+    missing = sorted(columns - set(df.columns))
+    if missing:
+        raise ValueError(f"{label} missing required columns: {missing}")
+
+
+def validate_versions(
+    df: pd.DataFrame,
+    column: str,
+    expected: str,
+    label: str,
+) -> None:
+    if column not in df.columns:
+        raise ValueError(f"{label} missing version column: {column}")
+
+    observed = {str(x).strip() for x in df[column].dropna()}
+    if observed != {expected}:
+        raise ValueError(
+            f"{label} version mismatch. "
+            f"Expected {expected}; observed {sorted(observed)}"
+        )
+
+
+def add_exception(
+    exceptions: list[dict[str, Any]],
+    check_name: str,
+    severity: str,
+    message: str,
+    cik_value: Any = "",
+    artifact: str = "STEP21",
+) -> None:
+    exceptions.append(
+        {
+            "check_name": check_name,
+            "severity": severity,
+            "message": message,
+            "cik": cik(cik_value),
+            "artifact": artifact,
+        }
+    )
+
+
+def values(df: pd.DataFrame, column: str) -> set[str]:
+    if column not in df.columns:
+        return set()
+    return {
+        str(x).strip().upper()
+        for x in df[column].dropna()
+        if str(x).strip()
+    }
+
+
+# =============================================================================
+# INPUT LOADERS
+# =============================================================================
+
+def load_inputs(args: argparse.Namespace) -> dict[str, pd.DataFrame]:
+    search = read(args.search, "Step 21 company search")
+    screening = read(args.screening, "Step 21 company screening")
+    summary = read(args.summary, "Step 21 summary")
+    lineage = read(args.lineage, "Step 21 lineage")
+    promotion = read(args.promotion, "Step 21 promotion")
+
+    s16 = read(args.step16_profile, "Step 16 profile")
+    s20 = read(args.step20_profile, "Step 20 profile")
+    signals = read(args.step20_signals, "Step 20 signals")
+    master = read(args.company_master, "Company master")
+
+    return {
+        "search": search,
+        "screening": screening,
+        "summary": summary,
+        "lineage": lineage,
+        "promotion": promotion,
+        "step16": s16,
+        "step20": s20,
+        "signals": signals,
+        "master": master,
+    }
+
+
+# =============================================================================
+# GENERIC ARTIFACT AUDITS
+# =============================================================================
+
+def audit_schema(
+    inputs: dict[str, pd.DataFrame],
+    exceptions: list[dict[str, Any]],
+) -> None:
+    required = {
+        "search": REQUIRED_SEARCH,
+        "screening": REQUIRED_SCREENING,
+        "summary": REQUIRED_SUMMARY,
+        "lineage": REQUIRED_LINEAGE,
+        "promotion": {
+            "step",
+            "step21_version",
+            "promotion_decision",
+            "company_count",
+            "fatal_exception_count",
+            "warning_count",
+            "new_financial_score_created",
+            "new_ranking_created",
+            "funding_stage_inference_prevented",
+            "investor_identity_inference_prevented",
+            "ownership_inference_prevented",
+            "valuation_inference_prevented",
+            "sec_capital_separate_from_valuation",
+        },
+        "step16": REQUIRED_STEP16,
+        "step20": REQUIRED_STEP20,
+        "signals": REQUIRED_SIGNALS,
+        "master": {"cik", "company_name"},
+    }
+
+    for name, cols in required.items():
+        df = inputs[name]
+        missing = sorted(cols - set(df.columns))
+        if missing:
+            add_exception(
+                exceptions,
+                "SCHEMA",
+                "FATAL",
+                f"{name} missing required columns: {missing}.",
+                artifact=name,
+            )
+
+
+def audit_versions(
+    inputs: dict[str, pd.DataFrame],
+    exceptions: list[dict[str, Any]],
+) -> None:
+    checks = [
+        ("search", "step21_version", STEP21_VERSION_EXPECTED),
+        ("screening", "step21_version", STEP21_VERSION_EXPECTED),
+        ("summary", "step21_version", STEP21_VERSION_EXPECTED),
+        ("lineage", "step21_version", STEP21_VERSION_EXPECTED),
+        ("promotion", "step21_version", STEP21_VERSION_EXPECTED),
+        ("step16", "profile_version", STEP16_VERSION_EXPECTED),
+        ("step20", "step20_version", STEP20_VERSION_EXPECTED),
+        ("signals", "step20_version", STEP20_VERSION_EXPECTED),
+    ]
+
+    for artifact, column, expected in checks:
+        df = inputs[artifact]
+        if column not in df.columns:
+            continue
+
+        try:
+            validate_versions(df, column, expected, artifact)
+        except ValueError as exc:
+            add_exception(
+                exceptions,
+                "VERSION_COMPATIBILITY",
+                "FATAL",
+                str(exc),
+                artifact=artifact,
+            )
+
+
+# =============================================================================
+# COMPANY UNIVERSE / IDENTITY
+# =============================================================================
+
+def audit_company_master_coverage(
+    inputs: dict[str, pd.DataFrame],
+    exceptions: list[dict[str, Any]],
+) -> None:
+    search = inputs["search"]
+    master = inputs["master"]
+
+    configured = set(search["cik"].map(cik))
+    master_ciks = set(master["cik"].map(cik))
+
+    missing = sorted(configured - master_ciks)
+    unexpected = sorted(master_ciks - configured)
+
+    # This is intentionally fatal. Step 21 should not silently fall back to
+    # Step 16 identity when the authoritative company master is missing a CIK.
+    for key in missing:
+        add_exception(
+            exceptions,
+            "COMPANY_MASTER_COVERAGE",
+            "FATAL",
+            "Configured Step 21 company is missing from company master.",
+            key,
+            "COMPANY_MASTER",
+        )
+
+    if unexpected:
+        # The master is a broader universe by design (7992 rows in the current
+        # project). Extra master companies are therefore informational only.
+        logger.info(
+            "Company master contains %d companies outside the current Step 21 "
+            "configured/output universe; retained as master reference data.",
+            len(unexpected),
+        )
+
+
+def audit_universe_grain(
+    inputs: dict[str, pd.DataFrame],
+    exceptions: list[dict[str, Any]],
+) -> None:
+    for name in ("search", "screening", "step16", "step20"):
+        df = inputs[name]
+        if "cik" not in df.columns:
+            continue
+
+        normalized = df["cik"].map(cik)
+
+        if normalized.eq("").any():
+            add_exception(
+                exceptions,
+                "IDENTITY",
+                "FATAL",
+                f"{name} contains blank/invalid CIK.",
+                artifact=name,
+            )
+
+        if normalized.duplicated().any():
+            dupes = sorted(normalized[normalized.duplicated()].unique())
+            add_exception(
+                exceptions,
+                "GRAIN",
+                "FATAL",
+                f"{name} is not one row per CIK; duplicate CIKs: {dupes[:20]}",
+                artifact=name,
+            )
+
+
+def audit_universe_alignment(
+    inputs: dict[str, pd.DataFrame],
+    exceptions: list[dict[str, Any]],
+) -> None:
+    universes = {
+        name: set(inputs[name]["cik"].map(cik))
+        for name in ("search", "screening", "step16", "step20")
+    }
+
+    base = universes["search"]
+
+    for name, current in universes.items():
+        missing = sorted(base - current)
+        extra = sorted(current - base)
+
+        for key in missing:
+            add_exception(
+                exceptions,
+                "UNIVERSE_ALIGNMENT",
+                "FATAL",
+                f"{name} is missing CIK present in Step 21 search.",
+                key,
+                name,
+            )
+
+        for key in extra:
+            add_exception(
+                exceptions,
+                "UNIVERSE_ALIGNMENT",
+                "FATAL",
+                f"{name} contains CIK not present in Step 21 search.",
+                key,
+                name,
+            )
+
+
+# =============================================================================
+# VALUE / SEMANTIC AUDITS
+# =============================================================================
+
+def audit_allowed_values(
+    inputs: dict[str, pd.DataFrame],
+    exceptions: list[dict[str, Any]],
+) -> None:
+    df = inputs["search"]
+
+    checks = [
+        ("financial_decision", VALID_DECISIONS),
+        ("financial_trajectory", VALID_TRAJECTORIES),
+        ("unified_posture", VALID_POSTURES),
+        ("data_coverage", VALID_COVERAGE),
+        ("screening_eligibility", VALID_ELIGIBILITY),
+        ("financial_health", VALID_HEALTH),
+        ("financial_risk_signal", VALID_RISK),
+        ("profile_quality", VALID_PROFILE_QUALITY),
+        ("funding_status", VALID_COVERAGE_STATUS),
+        ("investor_coverage_status", VALID_COVERAGE_STATUS),
+        ("ownership_status", VALID_COVERAGE_STATUS),
+        ("valuation_status", VALID_COVERAGE_STATUS),
+    ]
+
+    for column, allowed in checks:
+        if column not in df.columns:
+            continue
+
+        bad = sorted(values(df, column) - {str(x).upper() for x in allowed if x})
+        if bad:
+            add_exception(
+                exceptions,
+                f"{column.upper()}_VALUES",
+                "FATAL",
+                f"Invalid values in {column}: {bad}.",
+            )
+
+
+def audit_identity_consistency(
+    inputs: dict[str, pd.DataFrame],
+    exceptions: list[dict[str, Any]],
+) -> None:
+    search = inputs["search"]
+    s16 = inputs["step16"]
+    master = inputs["master"]
+
+    for _, row in search.iterrows():
+        key = cik(row["cik"])
+        if not text(row.get("company_name")):
+            add_exception(
+                exceptions,
+                "IDENTITY",
+                "FATAL",
+                "Step 21 company_name is blank.",
+                key,
+            )
+
+    s16_map = {
+        cik(r["cik"]): text(r["company_name"])
+        for _, r in s16.iterrows()
+    }
+    master_map = {
+        cik(r["cik"]): text(r["company_name"])
+        for _, r in master.iterrows()
+    }
+
+    for _, row in search.iterrows():
+        key = cik(row["cik"])
+        observed = text(row.get("company_name"))
+        master_name = master_map.get(key)
+        step16_name = s16_map.get(key)
+
+        if master_name and observed != master_name:
+            add_exception(
+                exceptions,
+                "MASTER_IDENTITY_RECONCILIATION",
+                "FATAL",
+                f"Company name mismatch: search={observed!r}, "
+                f"master={master_name!r}.",
+                key,
+            )
+
+        if step16_name and observed != step16_name:
+            add_exception(
+                exceptions,
+                "STEP16_IDENTITY_RECONCILIATION",
+                "FATAL",
+                f"Company name mismatch: search={observed!r}, "
+                f"Step16={step16_name!r}.",
+                key,
+            )
+
+
+# =============================================================================
+# DETERMINISM
+# =============================================================================
+
+def audit_screening_determinism(
+    inputs: dict[str, pd.DataFrame],
+    exceptions: list[dict[str, Any]],
+) -> None:
+    df = inputs["search"]
+
+    # Reproduce the exact Step 21 eligibility rule.
+    expected_eligibility = []
+    for _, r in df.iterrows():
+        decision = upper(r.get("financial_decision"))
+        quality = upper(r.get("profile_quality"))
+        coverage = upper(r.get("data_coverage"))
+
+        if decision not in VALID_DECISIONS:
+            expected = "INSUFFICIENT_DATA"
+        elif quality == "COMPLETE" and coverage in VALID_COVERAGE - {"NO_DATA"}:
+            expected = "ELIGIBLE"
+        else:
+            expected = "LIMITED"
+
+        expected_eligibility.append(expected)
+
+    actual = df["screening_eligibility"].map(upper).tolist()
+    if actual != expected_eligibility:
+        bad = [
+            (cik(df.iloc[i]["cik"]), actual[i], expected_eligibility[i])
+            for i in range(len(df))
+            if actual[i] != expected_eligibility[i]
+        ]
+        for key, observed, expected in bad:
+            add_exception(
+                exceptions,
+                "ELIGIBILITY_DETERMINISM",
+                "FATAL",
+                f"screening_eligibility={observed!r}; expected={expected!r}.",
+                key,
+            )
+
+    checks = [
+        (
+            "is_strong_positive",
+            df["unified_posture"].map(upper).eq("STRONG_POSITIVE"),
+        ),
+        (
+            "is_positive",
+            df["unified_posture"].map(upper).isin(
+                {"STRONG_POSITIVE", "POSITIVE"}
+            ),
+        ),
+        (
+            "is_improving",
+            df["financial_trajectory"].map(upper).eq("IMPROVING"),
+        ),
+        (
+            "is_low_risk",
+            df["financial_risk_signal"].map(upper).eq("LOW"),
+        ),
+        (
+            "has_funding_data",
+            df["funding_status"].map(upper).eq("AVAILABLE"),
+        ),
+        (
+            "has_investor_data",
+            df["investor_coverage_status"].map(upper).eq("AVAILABLE"),
+        ),
+        (
+            "has_valuation_data",
+            df["valuation_status"].map(upper).eq("AVAILABLE"),
+        ),
+        (
+            "has_complete_data",
+            df["data_coverage"].map(upper).eq("COMPLETE"),
+        ),
+    ]
+
+    for column, expected in checks:
+        actual_bool = df[column].map(boolean)
+        if not expected.equals(actual_bool):
+            mismatches = df.index[expected != actual_bool].tolist()
+            for idx in mismatches:
+                add_exception(
+                    exceptions,
+                    f"{column.upper()}_DETERMINISM",
+                    "FATAL",
+                    f"{column} is not deterministic.",
+                    df.loc[idx, "cik"],
+                )
+
+
+def audit_screening_artifact(
+    inputs: dict[str, pd.DataFrame],
+    exceptions: list[dict[str, Any]],
+) -> None:
+    search = inputs["search"]
+    screening = inputs["screening"]
+
+    if len(search) != len(screening):
+        add_exception(
+            exceptions,
+            "SCREENING_GRAIN",
+            "FATAL",
+            f"Search rows={len(search)} but screening rows={len(screening)}.",
+        )
+
+    merged = search.merge(
+        screening,
+        on=["cik"],
+        how="outer",
+        suffixes=("_search", "_screen"),
+        indicator=True,
+        validate="one_to_one",
+    )
+
+    for _, row in merged.iterrows():
+        key = cik(row["cik"])
+
+        if row["_merge"] != "both":
+            add_exception(
+                exceptions,
+                "SCREENING_COVERAGE",
+                "FATAL",
+                "Company missing from either search or screening artifact.",
+                key,
+            )
+            continue
+
+        fields = [
+            "company_name",
+            "screening_eligibility",
+            "unified_posture",
+            "financial_decision",
+            "financial_trajectory",
+            "financial_score",
+            "financial_risk_signal",
+            "funding_status",
+            "valuation_status",
+            "data_coverage",
+            "is_strong_positive",
+            "is_positive",
+            "is_improving",
+            "is_low_risk",
+            "has_funding_data",
+            "has_investor_data",
+            "has_valuation_data",
+            "has_complete_data",
+        ]
+
+        for field in fields:
+            a = row.get(f"{field}_search")
+            b = row.get(f"{field}_screen")
+
+            if field == "financial_score":
+                na, nb = number(a), number(b)
+                equal = (
+                    na is None and nb is None
+                    or na is not None and nb is not None
+                    and abs(na - nb) <= 1e-9
+                )
+            else:
+                equal = upper(a) == upper(b) if field not in {
+                    "is_strong_positive",
+                    "is_positive",
+                    "is_improving",
+                    "is_low_risk",
+                    "has_funding_data",
+                    "has_investor_data",
+                    "has_valuation_data",
+                    "has_complete_data",
+                } else boolean(a) == boolean(b)
+
+            if not equal:
+                add_exception(
+                    exceptions,
+                    "SCREENING_RECONCILIATION",
+                    "FATAL",
+                    f"{field} mismatch between search and screening.",
+                    key,
+                )
+
+
+# =============================================================================
+# CROSS-LAYER RECONCILIATION
+# =============================================================================
+
+def audit_reconciliation(
+    inputs: dict[str, pd.DataFrame],
+    exceptions: list[dict[str, Any]],
+) -> None:
+    search = inputs["search"]
+
+    for source_name, source, fields in [
+        (
+            "STEP16_RECONCILIATION",
+            inputs["step16"],
+            [
+                "company_name",
+                "financial_health",
+                "financial_risk_signal",
+                "financial_trajectory",
+                "peer_position",
+                "peer_population_class",
+                "decision_confidence",
+                "decision_priority",
+                "decision_reason_code",
+                "company_archetype",
+                "profile_quality",
+            ],
+        ),
+        (
+            "STEP20_RECONCILIATION",
+            inputs["step20"],
+            [
+                "financial_decision",
+                "financial_trajectory",
+                "financial_score",
+                "funding_status",
+                "funding_event_count",
+                "sec_exempt_offering_capital_usd",
+                "investor_coverage_status",
+                "named_investor_count",
+                "ownership_status",
+                "ownership_pct_available",
+                "valuation_status",
+                "latest_valuation_amount_usd",
+                "latest_valuation_date",
+                "data_coverage",
+                "unified_posture",
+            ],
+        ),
+    ]:
+        src = source.copy()
+        src["cik"] = src["cik"].map(cik)
+
+        merged = search.merge(
+            src,
+            on="cik",
+            how="left",
+            suffixes=("_21", "_src"),
+            validate="one_to_one",
+        )
+
+        for _, row in merged.iterrows():
+            key = cik(row["cik"])
+
+            for field in fields:
+                a = row.get(f"{field}_21")
+                b = row.get(f"{field}_src")
+
+                if field in {
+                    "financial_score",
+                    "funding_event_count",
+                    "sec_exempt_offering_capital_usd",
+                    "named_investor_count",
+                    "latest_valuation_amount_usd",
+                }:
+                    na, nb = number(a), number(b)
+
+                    if na is None and nb is None:
+                        continue
+
+                    equal = (
+                        na is not None
+                        and nb is not None
+                        and abs(na - nb) <= 1e-9
+                    )
+                elif field == "ownership_pct_available":
+                    equal = nullable_boolean(a) == nullable_boolean(b)
+                elif field == "latest_valuation_date":
+                    # Dates may be represented as Timestamp/date/string in
+                    # Parquet. Compare normalized string values.
+                    equal = text(a) == text(b)
+                else:
+                    equal = upper(a) == upper(b)
+
+                if not equal:
+                    add_exception(
+                        exceptions,
+                        source_name,
+                        "FATAL",
+                        f"{field} mismatch: Step21={a!r}, source={b!r}.",
+                        key,
+                    )
+
+
+def audit_signal_integrity(
+    inputs: dict[str, pd.DataFrame],
+    exceptions: list[dict[str, Any]],
+) -> None:
+    signals = inputs["signals"]
+    search = inputs["search"]
+
+    if signals.empty:
+        add_exception(
+            exceptions,
+            "STEP20_SIGNAL_COVERAGE",
+            "FATAL",
+            "Step 20 signals artifact is empty.",
+            artifact="STEP20_SIGNALS",
+        )
+        return
+
+    signals = signals.copy()
+    signals["cik"] = signals["cik"].map(cik)
+
+    search_ciks = set(search["cik"].map(cik))
+    signal_ciks = set(signals["cik"])
+
+    unexpected = sorted(signal_ciks - search_ciks)
+    missing = sorted(search_ciks - signal_ciks)
+
+    for key in unexpected:
+        add_exception(
+            exceptions,
+            "STEP20_SIGNAL_UNIVERSE",
+            "FATAL",
+            "Step 20 signal contains CIK outside Step 21 universe.",
+            key,
+            "STEP20_SIGNALS",
+        )
+
+    # Step 20 currently produces multiple signal rows per company, so missing
+    # signal rows for a company are fatal, while exact signal-count equality is
+    # deliberately not assumed.
+    for key in missing:
+        add_exception(
+            exceptions,
+            "STEP20_SIGNAL_COVERAGE",
+            "FATAL",
+            "Step 20 signal artifact has no signal rows for Step 21 company.",
+            key,
+            "STEP20_SIGNALS",
+        )
+
+    bad_status = sorted(
+        {
+            x
+            for x in values(signals, "signal_status")
+            if x not in {
+                "AVAILABLE",
+                "PARTIAL",
+                "NO_DATA",
+                "POSITIVE",
+                "NEGATIVE",
+                "NEUTRAL",
+                "IMPROVING",
+                "MIXED",
+                "DETERIORATING",
+            }
+        }
+    )
+
+    if bad_status:
+        add_exception(
+            exceptions,
+            "STEP20_SIGNAL_VALUES",
+            "FATAL",
+            f"Unexpected Step 20 signal_status values: {bad_status}.",
+            artifact="STEP20_SIGNALS",
+        )
+
+
+# =============================================================================
+# GOVERNANCE / NO FABRICATION
+# =============================================================================
+
+def audit_governance_controls(
+    inputs: dict[str, pd.DataFrame],
+    exceptions: list[dict[str, Any]],
+) -> None:
+    search = inputs["search"]
+    summary = inputs["summary"]
+    lineage = inputs["lineage"]
+    promotion = inputs["promotion"]
+
+    # SEC capital must never be treated as valuation.
+    bad_sec = search["sec_capital_treated_as_valuation"].map(boolean)
+    for idx in search.index[bad_sec]:
+        add_exception(
+            exceptions,
+            "SEC_CAPITAL_SEPARATION",
+            "FATAL",
+            "SEC exempt-offering capital is marked as valuation.",
+            search.loc[idx, "cik"],
+        )
+
+    # Step 21 must inherit the Step 20 valuation fabrication control.
+    bad_valuation_control = ~search["valuation_fabrication_prevented"].map(boolean)
+    for idx in search.index[bad_valuation_control]:
+        add_exception(
+            exceptions,
+            "VALUATION_CONTROL",
+            "FATAL",
+            "Valuation fabrication prevention is disabled.",
+            search.loc[idx, "cik"],
+        )
+
+    # Funding/investor/ownership/valuation inference flags must be false in
+    # the summary and prevention flags must be true in promotion.
+    if not summary.empty:
+        s = summary.iloc[0]
+
+        expected_false = [
+            "new_financial_score_created",
+            "new_ranking_created",
+            "funding_stage_inference",
+            "investor_identity_inference",
+            "ownership_inference",
+            "valuation_inference",
+            "sec_capital_treated_as_valuation",
+        ]
+
+        for field in expected_false:
+            if boolean(s.get(field)):
+                add_exception(
+                    exceptions,
+                    "GOVERNANCE_CONTROL",
+                    "FATAL",
+                    f"Step 21 summary has prohibited flag enabled: {field}.",
+                )
+
+    if not promotion.empty:
+        p = promotion.iloc[0]
+
+        expected_true = [
+            "funding_stage_inference_prevented",
+            "investor_identity_inference_prevented",
+            "ownership_inference_prevented",
+            "valuation_inference_prevented",
+            "sec_capital_separate_from_valuation",
+        ]
+
+        for field in expected_true:
+            if not boolean(p.get(field)):
+                add_exception(
+                    exceptions,
+                    "GOVERNANCE_CONTROL",
+                    "FATAL",
+                    f"Step 21 promotion control is disabled: {field}.",
+                )
+
+    # Lineage must explicitly say that Step 21 does not create a new score.
+    if not lineage.empty:
+        bad_lineage = lineage[
+            lineage["new_financial_score_created"].map(boolean)
+        ]
+        if not bad_lineage.empty:
+            add_exception(
+                exceptions,
+                "LINEAGE_SCORE_CONTROL",
+                "FATAL",
+                "Lineage indicates a new financial score was created.",
+            )
+
+        forbidden = lineage[
+            lineage["output_field"].astype(str).str.lower().isin(
+                {
+                    "funding_stage",
+                    "investor_name_inferred",
+                    "ownership_pct_inferred",
+                    "valuation_inferred",
+                    "new_financial_score",
+                    "ranking_score",
+                }
+            )
+        ]
+        if not forbidden.empty:
+            add_exception(
+                exceptions,
+                "LINEAGE_INFERENCE_CONTROL",
+                "FATAL",
+                "Lineage exposes a prohibited inferred field.",
+            )
+
+
+# =============================================================================
+# SUMMARY / LINEAGE / PROMOTION RECONCILIATION
+# =============================================================================
+
+def audit_summary(
+    inputs: dict[str, pd.DataFrame],
+    exceptions: list[dict[str, Any]],
+) -> None:
+    search = inputs["search"]
+    screening = inputs["screening"]
+    summary = inputs["summary"]
+
+    if summary.empty:
+        add_exception(
+            exceptions,
+            "SUMMARY",
+            "FATAL",
+            "Step 21 summary is empty.",
+        )
+        return
+
+    s = summary.iloc[0]
+
+    expected_counts = {
+        "configured_company_count": int(search["cik"].nunique()),
+        "company_search_rows": len(search),
+        "screening_rows": len(screening),
+        "strong_positive_count": int(
+            search["unified_posture"].map(upper).eq("STRONG_POSITIVE").sum()
+        ),
+        "positive_count": int(
+            search["unified_posture"].map(upper).eq("POSITIVE").sum()
+        ),
+        "neutral_count": int(
+            search["unified_posture"].map(upper).eq("NEUTRAL").sum()
+        ),
+        "watch_count": int(
+            search["unified_posture"].map(upper).eq("WATCH").sum()
+        ),
+        "caution_count": int(
+            search["unified_posture"].map(upper).eq("CAUTION").sum()
+        ),
+        "insufficient_data_count": int(
+            search["unified_posture"].map(upper).eq("INSUFFICIENT_DATA").sum()
+        ),
+        "eligible_count": int(
+            search["screening_eligibility"].map(upper).eq("ELIGIBLE").sum()
+        ),
+        "limited_count": int(
+            search["screening_eligibility"].map(upper).eq("LIMITED").sum()
+        ),
+        "insufficient_screening_count": int(
+            search["screening_eligibility"]
+            .map(upper)
+            .eq("INSUFFICIENT_DATA")
+            .sum()
+        ),
+        "complete_data_count": int(
+            search["data_coverage"].map(upper).eq("COMPLETE").sum()
+        ),
+        "partial_data_count": int(
+            search["data_coverage"].map(upper).eq("PARTIAL").sum()
+        ),
+        "limited_data_count": int(
+            search["data_coverage"].map(upper).eq("LIMITED").sum()
+        ),
+        "no_data_count": int(
+            search["data_coverage"].map(upper).eq("NO_DATA").sum()
+        ),
+    }
+
+    for field, expected in expected_counts.items():
+        observed = integer(s.get(field))
+        if observed != expected:
+            add_exception(
+                exceptions,
+                "SUMMARY_RECONCILIATION",
+                "FATAL",
+                f"{field}: summary={observed!r}, expected={expected!r}.",
+            )
+
+    fixed_false = [
+        "new_financial_score_created",
+        "new_ranking_created",
+        "funding_stage_inference",
+        "investor_identity_inference",
+        "ownership_inference",
+        "valuation_inference",
+        "sec_capital_treated_as_valuation",
+    ]
+
+    for field in fixed_false:
+        if boolean(s.get(field)):
+            add_exception(
+                exceptions,
+                "SUMMARY_GOVERNANCE",
+                "FATAL",
+                f"{field} must be False.",
+            )
+
+
+def audit_lineage(
+    inputs: dict[str, pd.DataFrame],
+    exceptions: list[dict[str, Any]],
+) -> None:
+    lineage = inputs["lineage"]
+
+    if lineage.empty:
+        add_exception(
+            exceptions,
+            "LINEAGE",
+            "FATAL",
+            "Step 21 lineage is empty.",
+        )
+        return
+
+    required_fields = {
+        "cik",
+        "company_name",
+        "financial_decision",
+        "financial_trajectory",
+        "financial_score",
+        "funding_status",
+        "investor_coverage_status",
+        "ownership_status",
+        "valuation_status",
+        "data_coverage",
+        "unified_posture",
+        "screening_eligibility",
+        "is_strong_positive",
+        "is_positive",
+        "is_improving",
+        "is_low_risk",
+        "has_funding_data",
+        "has_investor_data",
+        "has_valuation_data",
+        "has_complete_data",
+    }
+
+    observed_fields = set(
+        lineage["output_field"].dropna().astype(str).str.strip()
+    )
+    missing = sorted(required_fields - observed_fields)
+
+    for field in missing:
+        add_exception(
+            exceptions,
+            "LINEAGE_COMPLETENESS",
+            "FATAL",
+            f"Required output field missing from lineage: {field}.",
+        )
+
+    # Financial score must be a pass-through from Step 20.
+    score_rows = lineage[
+        lineage["output_field"].astype(str).eq("financial_score")
+    ]
+    if score_rows.empty:
+        add_exception(
+            exceptions,
+            "LINEAGE_SCORE",
+            "FATAL",
+            "financial_score lineage entry is missing.",
+        )
+    else:
+        row = score_rows.iloc[0]
+        if upper(row.get("source")) != "STEP 20":
+            add_exception(
+                exceptions,
+                "LINEAGE_SCORE",
+                "FATAL",
+                "financial_score must be sourced from Step 20.",
+            )
+
+
+def audit_promotion(
+    inputs: dict[str, pd.DataFrame],
+    exceptions: list[dict[str, Any]],
+) -> None:
+    promotion = inputs["promotion"]
+
+    if promotion.empty:
+        add_exception(
+            exceptions,
+            "PROMOTION_ARTIFACT",
+            "FATAL",
+            "Step 21 promotion artifact is empty.",
+        )
+        return
+
+    if len(promotion) != 1:
+        add_exception(
+            exceptions,
+            "PROMOTION_GRAIN",
+            "FATAL",
+            f"Expected one promotion row; observed {len(promotion)}.",
+        )
+        return
+
+    row = promotion.iloc[0]
+
+    if upper(row.get("step")) != "STEP_21":
+        add_exception(
+            exceptions,
+            "PROMOTION_STEP",
+            "FATAL",
+            f"Promotion step must be STEP_21; observed {row.get('step')!r}.",
+        )
+
+    company_count = integer(row.get("company_count"))
+    actual_count = int(inputs["search"]["cik"].nunique())
+
+    if company_count != actual_count:
+        add_exception(
+            exceptions,
+            "PROMOTION_COMPANY_COUNT",
+            "FATAL",
+            f"Promotion company_count={company_count}; "
+            f"search company count={actual_count}.",
+        )
+
+    observed_decision = upper(row.get("promotion_decision"))
+
+    if observed_decision not in {"PROMOTE", "BLOCKED"}:
+        add_exception(
+            exceptions,
+            "PROMOTION_DECISION",
+            "FATAL",
+            f"Invalid promotion decision: {observed_decision!r}.",
+        )
+
+
+# =============================================================================
+# CONTROLLED SOURCE WARNINGS
+# =============================================================================
+
+def build_warnings(inputs: dict[str, pd.DataFrame]) -> list[str]:
+    search = inputs["search"]
+    warnings: list[str] = []
+
+    if not search["has_investor_data"].map(boolean).any():
+        warnings.append(
+            "Named investor enrichment unavailable; investor identity remains NO_DATA."
+        )
+
+    if not search["has_valuation_data"].map(boolean).any():
+        warnings.append(
+            "Valuation enrichment unavailable; valuation remains NO_DATA."
+        )
+
+    if search["has_funding_data"].map(boolean).any():
+        warnings.append(
+            "Funding coverage is SEC Form D based and is not complete "
+            "private-company funding history."
+        )
+
+    return warnings
+
+
+# =============================================================================
+# OUTPUT BUILDERS
+# =============================================================================
+
+def build_validation_checks(
+    exceptions: list[dict[str, Any]],
+    inputs: dict[str, pd.DataFrame],
+) -> pd.DataFrame:
+    failed_keys = {
+        (e["check_name"], e["severity"], e["message"], e["cik"])
+        for e in exceptions
+    }
+
+    rows: list[dict[str, Any]] = []
+
+    # Convert each emitted exception into a visible failed check.
+    for e in exceptions:
+        rows.append(
+            {
+                "check_name": e["check_name"],
+                "validation_status": "FAIL",
+                "severity": e["severity"],
+                "message": e["message"],
+                "cik": e["cik"],
+                "artifact": e["artifact"],
+                "step21_version": STEP21_VERSION_EXPECTED,
+                "dq_version": STEP21_DQ_VERSION,
+                "generated_at_utc": now(),
+            }
+        )
+
+    # A compact pass register is useful for operational DQ consumption.
+    pass_checks = [
+        "SCHEMA",
+        "VERSION_COMPATIBILITY",
+        "COMPANY_MASTER_COVERAGE",
+        "GRAIN",
+        "IDENTITY",
+        "UNIVERSE_ALIGNMENT",
+        "ALLOWED_VALUES",
+        "ELIGIBILITY_DETERMINISM",
+        "BOOLEAN_FILTER_DETERMINISM",
+        "SCREENING_RECONCILIATION",
+        "STEP16_RECONCILIATION",
+        "STEP20_RECONCILIATION",
+        "STEP20_SIGNAL_COVERAGE",
+        "STEP20_SIGNAL_UNIVERSE",
+        "STEP20_SIGNAL_VALUES",
+        "SEC_CAPITAL_SEPARATION",
+        "VALUATION_CONTROL",
+        "GOVERNANCE_CONTROL",
+        "LINEAGE_SCORE_CONTROL",
+        "LINEAGE_INFERENCE_CONTROL",
+        "SUMMARY_RECONCILIATION",
+        "SUMMARY_GOVERNANCE",
+        "LINEAGE_COMPLETENESS",
+        "LINEAGE_SCORE",
+        "PROMOTION_ARTIFACT",
+        "PROMOTION_GRAIN",
+        "PROMOTION_STEP",
+        "PROMOTION_COMPANY_COUNT",
+        "PROMOTION_DECISION",
+        "SCREENING_GRAIN",
+        "SCREENING_COVERAGE",
+    ]
+
+    failed_names = {e["check_name"] for e in exceptions}
+
+    for name in pass_checks:
+        if name not in failed_names:
+            rows.append(
+                {
+                    "check_name": name,
+                    "validation_status": "PASS",
+                    "severity": "INFO",
+                    "message": "Check passed.",
+                    "cik": "",
+                    "artifact": "STEP21",
+                    "step21_version": STEP21_VERSION_EXPECTED,
+                    "dq_version": STEP21_DQ_VERSION,
+                    "generated_at_utc": now(),
+                }
+            )
+
+    result = pd.DataFrame(rows)
+
+    if result.empty:
+        return pd.DataFrame(
+            columns=[
+                "check_name",
+                "validation_status",
+                "severity",
+                "message",
+                "cik",
+                "artifact",
+                "step21_version",
+                "dq_version",
+                "generated_at_utc",
+            ]
+        )
+
+    return result.sort_values(
+        ["validation_status", "severity", "check_name", "cik"]
+    ).reset_index(drop=True)
+
+
+def build_summary(
+    inputs: dict[str, pd.DataFrame],
+    exceptions: list[dict[str, Any]],
+    warnings: list[str],
+) -> pd.DataFrame:
+    search = inputs["search"]
+
+    fatal = sum(e["severity"] == "FATAL" for e in exceptions)
+    warning_count = len(warnings)
+
+    return pd.DataFrame(
+        [
+            {
+                "step": "STEP_21.1",
+                "audited_step": "STEP_21",
+                "step21_version": STEP21_VERSION_EXPECTED,
+                "dq_version": STEP21_DQ_VERSION,
+                "configured_company_count": int(search["cik"].nunique()),
+                "company_search_rows": len(search),
+                "screening_rows": len(inputs["screening"]),
+                "validation_checks": 0,  # populated by main after checks build
+                "failed_checks": fatal,
+                "fatal_exception_count": fatal,
+                "warning_count": warning_count,
+                "overall_status": "FAIL" if fatal else "PASS",
+                "promotion_decision": "BLOCKED" if fatal else "PROMOTE",
+                "company_master_coverage_enforced": True,
+                "cross_layer_reconciliation_enforced": True,
+                "screening_determinism_enforced": True,
+                "financial_score_pass_through_only": True,
+                "new_financial_score_created": False,
+                "new_ranking_created": False,
+                "funding_stage_inference_prevented": True,
+                "investor_identity_inference_prevented": True,
+                "ownership_inference_prevented": True,
+                "valuation_inference_prevented": True,
+                "sec_capital_separate_from_valuation": True,
+                "valuation_fabrication_prevented": True,
+                "generated_at_utc": now(),
+            }
+        ]
+    )
+
+
+def build_lineage(inputs: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {
+                "output_field": "company_search",
+                "source": "STEP21",
+                "transformation": "DQ audit of one-row-per-CIK discovery/search artifact",
+                "step21_version": STEP21_VERSION_EXPECTED,
+                "dq_version": STEP21_DQ_VERSION,
+            },
+            {
+                "output_field": "company_screening",
+                "source": "STEP21",
+                "transformation": "DQ audit of deterministic screening projection",
+                "step21_version": STEP21_VERSION_EXPECTED,
+                "dq_version": STEP21_DQ_VERSION,
+            },
+            {
+                "output_field": "financial_score",
+                "source": "STEP20",
+                "transformation": "Pass-through validation; no new score created",
+                "step21_version": STEP21_VERSION_EXPECTED,
+                "dq_version": STEP21_DQ_VERSION,
+            },
+            {
+                "output_field": "financial_decision",
+                "source": "STEP20",
+                "transformation": "Pass-through reconciliation",
+                "step21_version": STEP21_VERSION_EXPECTED,
+                "dq_version": STEP21_DQ_VERSION,
+            },
+            {
+                "output_field": "financial_trajectory",
+                "source": "STEP20",
+                "transformation": "Pass-through reconciliation",
+                "step21_version": STEP21_VERSION_EXPECTED,
+                "dq_version": STEP21_DQ_VERSION,
+            },
+            {
+                "output_field": "funding_status",
+                "source": "STEP20",
+                "transformation": "Pass-through; no funding-stage inference",
+                "step21_version": STEP21_VERSION_EXPECTED,
+                "dq_version": STEP21_DQ_VERSION,
+            },
+            {
+                "output_field": "investor_coverage_status",
+                "source": "STEP20",
+                "transformation": "Pass-through; no investor identity inference",
+                "step21_version": STEP21_VERSION_EXPECTED,
+                "dq_version": STEP21_DQ_VERSION,
+            },
+            {
+                "output_field": "ownership_status",
+                "source": "STEP20",
+                "transformation": "Pass-through; no ownership inference",
+                "step21_version": STEP21_VERSION_EXPECTED,
+                "dq_version": STEP21_DQ_VERSION,
+            },
+            {
+                "output_field": "valuation_status",
+                "source": "STEP20",
+                "transformation": "Pass-through; no valuation inference",
+                "step21_version": STEP21_VERSION_EXPECTED,
+                "dq_version": STEP21_DQ_VERSION,
+            },
+            {
+                "output_field": "screening_eligibility",
+                "source": "STEP21",
+                "transformation": "DQ re-derives deterministic eligibility rule",
+                "step21_version": STEP21_VERSION_EXPECTED,
+                "dq_version": STEP21_DQ_VERSION,
+            },
+            {
+                "output_field": "filter_flags",
+                "source": "STEP21",
+                "transformation": "DQ re-derives deterministic screening booleans",
+                "step21_version": STEP21_VERSION_EXPECTED,
+                "dq_version": STEP21_DQ_VERSION,
+            },
+        ]
+    )
+
+
+def build_promotion(
+    inputs: dict[str, pd.DataFrame],
+    exceptions: list[dict[str, Any]],
+    warnings: list[str],
+) -> pd.DataFrame:
+    fatal = sum(e["severity"] == "FATAL" for e in exceptions)
+
+    return pd.DataFrame(
+        [
+            {
+                "step": "STEP_21.1",
+                "audited_step": "STEP_21",
+                "step21_version": STEP21_VERSION_EXPECTED,
+                "dq_version": STEP21_DQ_VERSION,
+                "promotion_decision": "BLOCKED" if fatal else "PROMOTE",
+                "company_count": int(inputs["search"]["cik"].nunique()),
+                "fatal_exception_count": fatal,
+                "warning_count": len(warnings),
+                "cross_layer_reconciliation_enforced": True,
+                "company_master_coverage_enforced": True,
+                "screening_determinism_enforced": True,
+                "new_financial_score_created": False,
+                "new_ranking_created": False,
+                "funding_stage_inference_prevented": True,
+                "investor_identity_inference_prevented": True,
+                "ownership_inference_prevented": True,
+                "valuation_inference_prevented": True,
+                "sec_capital_separate_from_valuation": True,
+                "valuation_fabrication_prevented": True,
+                "generated_at_utc": now(),
+            }
+        ]
+    )
+
+
+# =============================================================================
+# MAIN
+# =============================================================================
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Step 21.1 - Company Discovery / Screening DQ"
+    )
+
+    parser.add_argument("--search", type=Path, default=STEP21_SEARCH)
+    parser.add_argument("--screening", type=Path, default=STEP21_SCREENING)
+    parser.add_argument("--summary", type=Path, default=STEP21_SUMMARY)
+    parser.add_argument("--lineage", type=Path, default=STEP21_LINEAGE)
+    parser.add_argument("--promotion", type=Path, default=STEP21_PROMOTION)
+
+    parser.add_argument(
+        "--step16-profile",
+        type=Path,
+        default=STEP16_PROFILE,
+    )
+    parser.add_argument(
+        "--step20-profile",
+        type=Path,
+        default=STEP20_PROFILE,
+    )
+    parser.add_argument(
+        "--step20-signals",
+        type=Path,
+        default=STEP20_SIGNALS,
+    )
+    parser.add_argument(
+        "--company-master",
+        type=Path,
+        default=COMPANY_MASTER,
+    )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=OUTPUT,
+    )
+
+    args = parser.parse_args()
+
+    logger.info("=" * 88)
+    logger.info("STEP 21.1 - COMPANY DISCOVERY / SCREENING DATA QUALITY")
+    logger.info("DQ version             : %s", STEP21_DQ_VERSION)
+    logger.info("Audited Step 21 version: %s", STEP21_VERSION_EXPECTED)
+    logger.info("=" * 88)
+
+    inputs = load_inputs(args)
+
+    logger.info("Step 21 search rows : %d", len(inputs["search"]))
+    logger.info("Step 21 screening   : %d", len(inputs["screening"]))
+    logger.info("Step 21 summary     : %d", len(inputs["summary"]))
+    logger.info("Step 21 lineage     : %d", len(inputs["lineage"]))
+    logger.info("Step 21 promotion   : %d", len(inputs["promotion"]))
+    logger.info("Step 16 profile     : %d", len(inputs["step16"]))
+    logger.info("Step 20 profile     : %d", len(inputs["step20"]))
+    logger.info("Step 20 signals     : %d", len(inputs["signals"]))
+    logger.info("Company master     : %d", len(inputs["master"]))
+
+    exceptions: list[dict[str, Any]] = []
+
+    # Schema/version checks first.
+    audit_schema(inputs, exceptions)
+    audit_versions(inputs, exceptions)
+
+    # Structural/universe checks.
+    audit_company_master_coverage(inputs, exceptions)
+    audit_universe_grain(inputs, exceptions)
+    audit_universe_alignment(inputs, exceptions)
+    audit_identity_consistency(inputs, exceptions)
+
+    # Step 21 business-rule checks.
+    audit_allowed_values(inputs, exceptions)
+    audit_screening_determinism(inputs, exceptions)
+    audit_screening_artifact(inputs, exceptions)
+
+    # Upstream reconciliation.
+    audit_reconciliation(inputs, exceptions)
+    audit_signal_integrity(inputs, exceptions)
+
+    # Governance / anti-fabrication.
+    audit_governance_controls(inputs, exceptions)
+
+    # Summary/lineage/promotion.
+    audit_summary(inputs, exceptions)
+    audit_lineage(inputs, exceptions)
+    audit_promotion(inputs, exceptions)
+
+    warnings = build_warnings(inputs)
+
+    checks = build_validation_checks(exceptions, inputs)
+    dq_summary = build_summary(inputs, exceptions, warnings)
+    dq_summary.loc[0, "validation_checks"] = len(checks)
+
+    lineage = build_lineage(inputs)
+    promotion = build_promotion(inputs, exceptions, warnings)
+
+    output = {
+        "checks": (
+            args.output
+            / "company_intelligence_validation_checks"
+            / "company_intelligence_validation_checks.parquet"
+        ),
+        "exceptions": (
+            args.output
+            / "company_intelligence_exceptions"
+            / "company_intelligence_exceptions.parquet"
+        ),
+        "summary": (
+            args.output
+            / "company_intelligence_dq_summary"
+            / "company_intelligence_dq_summary.parquet"
+        ),
+        "lineage": (
+            args.output
+            / "company_intelligence_dq_lineage"
+            / "company_intelligence_dq_lineage.parquet"
+        ),
+        "promotion": (
+            args.output
+            / "company_intelligence_promotion"
+            / "company_intelligence_promotion.parquet"
+        ),
+    }
+
+    for path in output.values():
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+    checks.to_parquet(output["checks"], index=False)
+
+    exception_df = pd.DataFrame(
+        exceptions,
+        columns=["check_name", "severity", "message", "cik", "artifact"],
+    )
+
+    if exception_df.empty:
+        exception_df = pd.DataFrame(
+            columns=["check_name", "severity", "message", "cik", "artifact"]
+        )
+
+    exception_df["step21_version"] = STEP21_VERSION_EXPECTED
+    exception_df["dq_version"] = STEP21_DQ_VERSION
+    exception_df["generated_at_utc"] = now()
+
+    exception_df.to_parquet(output["exceptions"], index=False)
+    dq_summary.to_parquet(output["summary"], index=False)
+    lineage.to_parquet(output["lineage"], index=False)
+    promotion.to_parquet(output["promotion"], index=False)
+
+    fatal = sum(e["severity"] == "FATAL" for e in exceptions)
+
+    logger.info("")
+    logger.info("=" * 88)
+    logger.info("STEP 21.1 SUMMARY")
+    logger.info("=" * 88)
+    logger.info("Validation checks      : %d", len(checks))
+    logger.info("Failed checks          : %d", fatal)
+    logger.info("Fatal DQ exceptions    : %d", fatal)
+    logger.info("Controlled warnings    : %d", len(warnings))
+    logger.info(
+        "Promotion decision      : %s",
+        "BLOCKED" if fatal else "PROMOTE",
+    )
+    logger.info("Company master coverage: ENFORCED")
+    logger.info("Cross-layer reconcile  : ENFORCED")
+    logger.info("Eligibility determinism: ENFORCED")
+    logger.info("Financial score         : PASS-THROUGH ONLY")
+    logger.info("New financial score     : NO")
+    logger.info("New ranking             : NO")
+    logger.info("SEC capital != valuation: ENFORCED")
+    logger.info("Funding-stage inference : PREVENTED")
+    logger.info("Investor identity       : PREVENTED")
+    logger.info("Ownership inference     : PREVENTED")
+    logger.info("Valuation inference     : PREVENTED")
+
+    for warning in warnings:
+        logger.warning(warning)
+
+    logger.info("DQ checks : %s", output["checks"])
+    logger.info("Exceptions: %s", output["exceptions"])
+    logger.info("Summary   : %s", output["summary"])
+    logger.info("Lineage   : %s", output["lineage"])
+    logger.info("Promotion : %s", output["promotion"])
+
+    if fatal:
+        logger.error(
+            "STEP 21.1 FAILED: Step 21 is not DQ-cleared."
+        )
+        raise RuntimeError(
+            f"Step 21.1 blocked promotion with {fatal} fatal DQ exception(s)."
+        )
+
+    logger.info("=" * 88)
+    logger.info("STEP 21.1 PASS: Company Discovery / Screening is DQ-cleared.")
+    logger.info("=" * 88)
+
+
+if __name__ == "__main__":
+    main()

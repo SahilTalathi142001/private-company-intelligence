@@ -1,0 +1,9 @@
+.env
+.env.*
+.venv/
+.venv-1/
+data/
+debug-63fc53.log
+logs/
+__pycache__/
+.pytest_cache/

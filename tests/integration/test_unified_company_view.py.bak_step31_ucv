@@ -1,0 +1,525 @@
+from __future__ import annotations
+
+import pandas as pd
+
+from company_platform.company_intelligence.company_state_store import (
+    CompanyStateStore,
+)
+
+from company_platform.company_intelligence.unified_company_view import (
+    UnifiedCompanyViewBuilder,
+)
+
+from company_platform.events.structured_event_store import (
+    StructuredEventStore,
+)
+
+from company_platform.investment_intelligence.signal_engine import (
+    InvestmentSignalStore,
+)
+
+from company_platform.investment_intelligence.decision_engine import (
+    DecisionSignalStore,
+)
+
+
+COMPANY_ID = "SEC_0000320193"
+CIK = "0000320193"
+
+
+def test_unified_company_view_combines_all_layers(
+    tmp_path,
+):
+    """
+    Verify that financial intelligence, Step 20,
+    company state, investment signals and decision
+    intelligence converge into one company-grain view.
+    """
+
+    # ------------------------------------------------------------------
+    # Stores
+    # ------------------------------------------------------------------
+
+    event_store = StructuredEventStore(
+        path=tmp_path / "structured_events.db"
+    )
+
+    state_store = CompanyStateStore(
+        path=tmp_path / "company_state.db"
+    )
+
+    signal_store = InvestmentSignalStore(
+        path=tmp_path / "signals.db"
+    )
+
+    decision_store = DecisionSignalStore(
+        path=tmp_path / "decisions.db"
+    )
+
+    # ------------------------------------------------------------------
+    # Create structured event
+    # ------------------------------------------------------------------
+
+    facts = {
+        "filing_date": "2026-10-05",
+        "issuer_name": "Example Technologies Inc.",
+        "total_offering_amount": "10000000",
+        "total_amount_sold": "4000000",
+    }
+
+    event = event_store.persist(
+        company_id=COMPANY_ID,
+        cik=CIK,
+        document_id="DOC-001",
+        document_class="SEC_FORM_D",
+        event_type="SEC_FORM_D_FILING",
+        source_document_path=(
+            "data/bronze/documents/"
+            "cik=0000320193/"
+            "DOC-001/"
+            "filing.pdf"
+        ),
+        source_document_sha256="a" * 64,
+        source_environment="PRODUCTION",
+        source_event_id="SOURCE-EVENT-001",
+        source_run_id="RUN-001",
+        event_confidence=1.0,
+        facts=facts,
+    )
+
+    # ------------------------------------------------------------------
+    # Build company state
+    # ------------------------------------------------------------------
+
+    from company_platform.company_intelligence.state_projector import (
+        CompanyStateProjector,
+    )
+
+    projector = CompanyStateProjector(
+        event_store=event_store,
+        state_store=state_store,
+    )
+
+    projector.project_company(
+        COMPANY_ID
+    )
+
+    state = state_store.get(
+        COMPANY_ID
+    )
+
+    assert state is not None
+    assert state["funding_event_count"] == 1
+
+    # ------------------------------------------------------------------
+    # Create signals
+    # ------------------------------------------------------------------
+
+    signal_store.persist(
+        company_id=COMPANY_ID,
+        cik=CIK,
+        state_version=int(
+            state["state_version"]
+        ),
+        signal_type="CAPITAL_ACTIVITY_DETECTED",
+        signal_value="TRUE",
+        signal_status="ACTIVE",
+        confidence="HIGH",
+        source_scope="COMPANY_INTELLIGENCE_STATE",
+        source_event_id=state[
+            "last_source_event_id"
+        ],
+        source_run_id=state[
+            "last_source_run_id"
+        ],
+        source_document_id=state[
+            "last_source_document_id"
+        ],
+        source_document_sha256=state[
+            "last_source_document_sha256"
+        ],
+        reason="Observed funding event.",
+    )
+
+    # ------------------------------------------------------------------
+    # Create decision
+    # ------------------------------------------------------------------
+
+    decision_store.persist(
+        company_id=COMPANY_ID,
+        cik=CIK,
+        state_version=int(
+            state["state_version"]
+        ),
+        decision_type="INVESTMENT_POSTURE",
+        decision_value="MONITOR",
+        decision_status="ACTIVE",
+        confidence="MEDIUM",
+        source_signal_count=1,
+        source_event_id=state[
+            "last_source_event_id"
+        ],
+        source_run_id=state[
+            "last_source_run_id"
+        ],
+        source_document_id=state[
+            "last_source_document_id"
+        ],
+        source_document_sha256=state[
+            "last_source_document_sha256"
+        ],
+        rationale=(
+            "Observed capital activity exists."
+        ),
+    )
+
+    # ------------------------------------------------------------------
+    # Build synthetic Step 16 / Step 20 artifacts
+    # ------------------------------------------------------------------
+
+    step16 = pd.DataFrame(
+        [
+            {
+                "cik": CIK,
+                "company_name": (
+                    "Example Technologies Inc."
+                ),
+                "financial_health": "HEALTHY",
+                "financial_risk_signal": "LOW",
+                "financial_trajectory": "IMPROVING",
+                "peer_position": "ABOVE_MEDIAN",
+                "decision_confidence": "HIGH",
+                "decision_priority": 1,
+                "decision_reason_code": "STRONG_FINANCIALS",
+                "company_archetype": "GROWTH",
+                "profile_version": "1.1.0",
+            }
+        ]
+    )
+
+    step20 = pd.DataFrame(
+        [
+            {
+                "cik": CIK,
+                "company_name": (
+                    "Example Technologies Inc."
+                ),
+                "financial_decision": "POSITIVE",
+                "financial_trajectory": "IMPROVING",
+                "financial_score": 85.0,
+                "financial_health": "HEALTHY",
+                "financial_risk_signal": "LOW",
+                "peer_position": "ABOVE_MEDIAN",
+                "decision_confidence": "HIGH",
+                "decision_priority": 1,
+                "decision_reason_code": "STRONG_FINANCIALS",
+                "company_archetype": "GROWTH",
+                "unified_posture": "POSITIVE",
+                "data_coverage": "COMPLETE",
+                "funding_status": "AVAILABLE",
+                "funding_event_count": 1,
+                "sec_exempt_offering_capital_usd": 4000000.0,
+                "funding_activity_status": "ACTIVE",
+                "investor_coverage_status": "NO_DATA",
+                "named_investor_count": 0,
+                "ownership_status": "NO_DATA",
+                "ownership_pct_available": False,
+                "valuation_status": "NO_DATA",
+                "latest_valuation_amount_usd": None,
+                "latest_valuation_date": None,
+                "sec_capital_context_usd": 4000000.0,
+                "sec_capital_treated_as_valuation": False,
+                "valuation_fabrication_prevented": True,
+                "step20_version": "20.0.0",
+            }
+        ]
+    )
+
+    master = pd.DataFrame(
+        [
+            {
+                "cik": CIK,
+                "company_name": (
+                    "Example Technologies Inc."
+                ),
+                "ticker": None,
+                "industry": "Technology",
+                "founded_year": 2020,
+                "headquarters": "United States",
+                "company_status": "ACTIVE",
+            }
+        ]
+    )
+
+    step16_path = (
+        tmp_path
+        / "step16.parquet"
+    )
+
+    step20_path = (
+        tmp_path
+        / "step20.parquet"
+    )
+
+    master_path = (
+        tmp_path
+        / "master.parquet"
+    )
+
+    step16.to_parquet(
+        step16_path,
+        index=False,
+    )
+
+    step20.to_parquet(
+        step20_path,
+        index=False,
+    )
+
+    master.to_parquet(
+        master_path,
+        index=False,
+    )
+
+    # ------------------------------------------------------------------
+    # Build unified view
+    # ------------------------------------------------------------------
+
+    builder = UnifiedCompanyViewBuilder(
+        state_store=state_store,
+        signal_store=signal_store,
+        decision_store=decision_store,
+    )
+
+    result = builder.build(
+        step16_path=step16_path,
+        step20_path=step20_path,
+        company_master_path=master_path,
+    )
+
+    # ------------------------------------------------------------------
+    # Identity
+    # ------------------------------------------------------------------
+
+    assert len(result) == 1
+
+    row = result.iloc[0]
+
+    assert row["cik"] == CIK
+    assert row["company_id"] == COMPANY_ID
+    assert row["company_name"] == (
+        "Example Technologies Inc."
+    )
+
+    # ------------------------------------------------------------------
+    # Financial intelligence
+    # ------------------------------------------------------------------
+
+    assert row["financial_decision"] == "POSITIVE"
+
+    assert row["financial_trajectory"] == (
+        "IMPROVING"
+    )
+
+    assert row["financial_score"] == 85.0
+
+    assert row["financial_risk_signal"] == "LOW"
+
+    # ------------------------------------------------------------------
+    # Company state
+    # ------------------------------------------------------------------
+
+    assert row[
+        "company_state_status"
+    ] == "ACTIVE"
+
+    assert row[
+        "observed_funding_event_count"
+    ] == 1
+
+    assert row[
+        "latest_funding_date"
+    ] == "2026-10-05"
+
+    assert row[
+        "latest_total_offering_amount_usd"
+    ] == 10_000_000.0
+
+    assert row[
+        "latest_amount_sold_usd"
+    ] == 4_000_000.0
+
+    # ------------------------------------------------------------------
+    # Investment signals
+    # ------------------------------------------------------------------
+
+    assert row[
+        "investment_signal_count"
+    ] == 1
+
+    assert row[
+        "capital_activity_detected"
+    ]
+
+    # ------------------------------------------------------------------
+    # Decision intelligence
+    # ------------------------------------------------------------------
+
+    assert row[
+        "event_decision_posture"
+    ] == "MONITOR"
+
+    assert row[
+        "event_decision_confidence"
+    ] == "MEDIUM"
+
+    # ------------------------------------------------------------------
+    # Provenance
+    # ------------------------------------------------------------------
+
+    assert row[
+        "source_event_id"
+    ] == "SOURCE-EVENT-001"
+
+    assert row[
+        "source_run_id"
+    ] == "RUN-001"
+
+    assert row[
+        "source_document_id"
+    ] == "DOC-001"
+
+    assert row[
+        "source_document_sha256"
+    ] == "a" * 64
+
+
+def test_unified_company_view_is_one_row_per_company(
+    tmp_path,
+):
+    """
+    Company view must maintain one-row-per-CIK grain.
+    """
+
+    event_store = StructuredEventStore(
+        path=tmp_path / "events.db"
+    )
+
+    state_store = CompanyStateStore(
+        path=tmp_path / "state.db"
+    )
+
+    signal_store = InvestmentSignalStore(
+        path=tmp_path / "signals.db"
+    )
+
+    decision_store = DecisionSignalStore(
+        path=tmp_path / "decisions.db"
+    )
+
+    step16 = pd.DataFrame(
+        [
+            {
+                "cik": "0000320193",
+                "company_name": "Apple",
+                "profile_version": "1.1.0",
+            },
+            {
+                "cik": "0000789019",
+                "company_name": "Microsoft",
+                "profile_version": "1.1.0",
+            },
+        ]
+    )
+
+    step20 = pd.DataFrame(
+        [
+            {
+                "cik": "0000320193",
+                "company_name": "Apple",
+                "financial_decision": "POSITIVE",
+                "financial_trajectory": "IMPROVING",
+                "step20_version": "20.0.0",
+            },
+            {
+                "cik": "0000789019",
+                "company_name": "Microsoft",
+                "financial_decision": "NEUTRAL",
+                "financial_trajectory": "MIXED",
+                "step20_version": "20.0.0",
+            },
+        ]
+    )
+
+    master = pd.DataFrame(
+        [
+            {
+                "cik": "0000320193",
+                "company_name": "Apple",
+                "ticker": "AAPL",
+            },
+            {
+                "cik": "0000320193",
+                "company_name": "Apple",
+                "ticker": "AAPL-PD",
+            },
+            {
+                "cik": "0000789019",
+                "company_name": "Microsoft",
+                "ticker": "MSFT",
+            },
+        ]
+    )
+
+    step16_path = (
+        tmp_path / "step16.parquet"
+    )
+
+    step20_path = (
+        tmp_path / "step20.parquet"
+    )
+
+    master_path = (
+        tmp_path / "master.parquet"
+    )
+
+    step16.to_parquet(
+        step16_path,
+        index=False,
+    )
+
+    step20.to_parquet(
+        step20_path,
+        index=False,
+    )
+
+    master.to_parquet(
+        master_path,
+        index=False,
+    )
+
+    builder = UnifiedCompanyViewBuilder(
+        state_store=state_store,
+        signal_store=signal_store,
+        decision_store=decision_store,
+    )
+
+    result = builder.build(
+        step16_path=step16_path,
+        step20_path=step20_path,
+        company_master_path=master_path,
+    )
+
+    assert len(result) == 2
+
+    assert result["cik"].nunique() == 2
+    apple = result[result["cik"] == "0000320193"].iloc[0]
+    assert pd.isna(apple["ticker"])
+    assert apple["tickers"] == "AAPL|AAPL-PD"
+    microsoft = result[result["cik"] == "0000789019"].iloc[0]
+    assert microsoft["ticker"] == "MSFT"
+    assert microsoft["tickers"] == "MSFT"
+
+    assert not result[
+        "cik"
+    ].duplicated().any()

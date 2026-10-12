@@ -1,0 +1,51 @@
+﻿cik,company_name,registry_status,ingestion_enabled,bronze_companyfacts_exists,bronze_submissions_exists,silver_facts_exists,silver_facts_rows,silver_financial_facts_exists,silver_financial_facts_rows,gold_annual_exists,gold_annual_rows,gold_quarterly_exists,gold_quarterly_rows,gold_analytics_exists,financial_task_count,financial_task_statuses,read_errors,diagnosis
+0000320193,Apple Inc.,ACTIVE,True,True,True,True,1575,True,1812,True,344,True,186,True,550,"{""financial_decision"": {""BLOCKED"": 7, ""FAILED"": 1, ""SUCCESS"": 102}, ""financial_features"": {""BLOCKED"": 7, ""SUCCESS"": 103}, ""financial_normalization"": {""BLOCKED"": 7, ""SUCCESS"": 103}, ""quarter_derivation"": {""BLOCKED"": 7, ""SUCCESS"": 103}, ""sec_ingestion"": {""BLOCKED"": 6, ""FAILED"": 1, ""SUCCESS"": 103}}",{},FINANCIAL_DATA_PRESENT_API_LOOKUP_SHOULD_BE_AVAILABLE
+0000789019,MICROSOFT CORP,ACTIVE,True,True,True,True,1577,True,1855,True,338,True,184,True,100,"{""financial_decision"": {""SUCCESS"": 20}, ""financial_features"": {""SUCCESS"": 20}, ""financial_normalization"": {""SUCCESS"": 20}, ""quarter_derivation"": {""SUCCESS"": 20}, ""sec_ingestion"": {""SUCCESS"": 20}}",{},FINANCIAL_DATA_PRESENT_API_LOOKUP_SHOULD_BE_AVAILABLE
+0001018724,AMAZON COM INC,ACTIVE,True,True,True,True,1563,True,1887,True,277,True,193,True,100,"{""financial_decision"": {""SUCCESS"": 20}, ""financial_features"": {""SUCCESS"": 20}, ""financial_normalization"": {""SUCCESS"": 20}, ""quarter_derivation"": {""SUCCESS"": 20}, ""sec_ingestion"": {""SUCCESS"": 20}}",{},FINANCIAL_DATA_PRESENT_API_LOOKUP_SHOULD_BE_AVAILABLE
+0001045810,NVIDIA CORP,ACTIVE,True,True,True,True,1510,True,1658,True,320,True,190,True,100,"{""financial_decision"": {""SUCCESS"": 20}, ""financial_features"": {""SUCCESS"": 20}, ""financial_normalization"": {""SUCCESS"": 20}, ""quarter_derivation"": {""SUCCESS"": 20}, ""sec_ingestion"": {""SUCCESS"": 20}}",{},FINANCIAL_DATA_PRESENT_API_LOOKUP_SHOULD_BE_AVAILABLE
+0001652044,Alphabet Inc.,ACTIVE,True,True,True,True,860,True,1063,True,224,True,118,True,100,"{""financial_decision"": {""SUCCESS"": 20}, ""financial_features"": {""SUCCESS"": 20}, ""financial_normalization"": {""SUCCESS"": 20}, ""quarter_derivation"": {""SUCCESS"": 20}, ""sec_ingestion"": {""SUCCESS"": 20}}",{},FINANCIAL_DATA_PRESENT_API_LOOKUP_SHOULD_BE_AVAILABLE
+0000796343,ADOBE INC.,ACTIVE,True,True,True,True,1641,True,1713,True,348,True,210,True,100,"{""financial_decision"": {""SUCCESS"": 20}, ""financial_features"": {""SUCCESS"": 20}, ""financial_normalization"": {""SUCCESS"": 20}, ""quarter_derivation"": {""SUCCESS"": 20}, ""sec_ingestion"": {""SUCCESS"": 20}}",{},FINANCIAL_DATA_PRESENT_API_LOOKUP_SHOULD_BE_AVAILABLE
+0000002488,ADVANCED MICRO DEVICES INC,ACTIVE,True,True,True,True,1132,True,1387,True,255,True,181,True,100,"{""financial_decision"": {""FAILED"": 20}, ""financial_features"": {""SUCCESS"": 20}, ""financial_normalization"": {""SUCCESS"": 20}, ""quarter_derivation"": {""SUCCESS"": 20}, ""sec_ingestion"": {""SUCCESS"": 20}}",{},FINANCIAL_DATA_PRESENT_API_LOOKUP_SHOULD_BE_AVAILABLE
+0001730168,Broadcom Inc.,ACTIVE,True,True,True,True,466,True,843,True,174,True,72,True,100,"{""financial_decision"": {""FAILED"": 20}, ""financial_features"": {""SUCCESS"": 20}, ""financial_normalization"": {""SUCCESS"": 20}, ""quarter_derivation"": {""SUCCESS"": 20}, ""sec_ingestion"": {""SUCCESS"": 20}}",{},FINANCIAL_DATA_PRESENT_API_LOOKUP_SHOULD_BE_AVAILABLE
+0000909832,COSTCO WHOLESALE CORP /NEW,ACTIVE,True,True,True,True,1877,True,2342,True,342,True,210,True,50,"{""financial_decision"": {""FAILED"": 2, ""SUCCESS"": 8}, ""financial_features"": {""SUCCESS"": 10}, ""financial_normalization"": {""SUCCESS"": 10}, ""quarter_derivation"": {""SUCCESS"": 10}, ""sec_ingestion"": {""SUCCESS"": 10}}",{},FINANCIAL_DATA_PRESENT_API_LOOKUP_SHOULD_BE_AVAILABLE
+0001108524,"Salesforce, Inc.",ACTIVE,True,False,False,False,,False,,False,,False,,False,0,{},{},NO_FINANCIAL_SOURCE_INPUT_AND_NO_FINANCIAL_TASK_HISTORY
+0000059478,ELI LILLY & Co,ACTIVE,True,False,False,False,,False,,False,,False,,False,0,{},{},NO_FINANCIAL_SOURCE_INPUT_AND_NO_FINANCIAL_TASK_HISTORY
+0001141391,Mastercard Inc,ACTIVE,True,False,False,False,,False,,False,,False,,False,0,{},{},NO_FINANCIAL_SOURCE_INPUT_AND_NO_FINANCIAL_TASK_HISTORY
+0001326801,"Meta Platforms, Inc.",ACTIVE,True,False,False,False,,False,,False,,False,,False,0,{},{},NO_FINANCIAL_SOURCE_INPUT_AND_NO_FINANCIAL_TASK_HISTORY
+0001065280,NETFLIX INC,ACTIVE,True,False,False,False,,False,,False,,False,,False,0,{},{},NO_FINANCIAL_SOURCE_INPUT_AND_NO_FINANCIAL_TASK_HISTORY
+0001318605,"Tesla, Inc.",ACTIVE,True,False,False,False,,False,,False,,False,,False,0,{},{},NO_FINANCIAL_SOURCE_INPUT_AND_NO_FINANCIAL_TASK_HISTORY
+0001403161,VISA INC.,ACTIVE,True,False,False,False,,False,,False,,False,,False,0,{},{},NO_FINANCIAL_SOURCE_INPUT_AND_NO_FINANCIAL_TASK_HISTORY
+0000104169,Walmart Inc.,ACTIVE,True,False,False,False,,False,,False,,False,,False,0,{},{},NO_FINANCIAL_SOURCE_INPUT_AND_NO_FINANCIAL_TASK_HISTORY
+0002115436,ExxonMobil Holdings Corp,ACTIVE,True,False,False,False,,False,,False,,False,,False,0,{},{},NO_FINANCIAL_SOURCE_INPUT_AND_NO_FINANCIAL_TASK_HISTORY
+0000019617,JPMORGAN CHASE & CO,ACTIVE,True,False,False,False,,False,,False,,False,,False,0,{},{},NO_FINANCIAL_SOURCE_INPUT_AND_NO_FINANCIAL_TASK_HISTORY
+0001341439,ORACLE CORP,ACTIVE,True,False,False,False,,False,,False,,False,,False,0,{},{},NO_FINANCIAL_SOURCE_INPUT_AND_NO_FINANCIAL_TASK_HISTORY
+0001551152,AbbVie Inc.,ACTIVE,True,False,False,False,,False,,False,,False,,False,0,{},{},NO_FINANCIAL_SOURCE_INPUT_AND_NO_FINANCIAL_TASK_HISTORY
+0000008670,AUTOMATIC DATA PROCESSING INC,ACTIVE,True,False,False,False,,False,,False,,False,,False,0,{},{},NO_FINANCIAL_SOURCE_INPUT_AND_NO_FINANCIAL_TASK_HISTORY
+0000006951,APPLIED MATERIALS INC /DE,ACTIVE,True,False,False,False,,False,,False,,False,,False,0,{},{},NO_FINANCIAL_SOURCE_INPUT_AND_NO_FINANCIAL_TASK_HISTORY
+0000012927,BOEING CO,ACTIVE,True,True,True,True,1525,True,1967,True,315,True,213,True,0,{},{},FINANCIAL_DATA_PRESENT_API_LOOKUP_SHOULD_BE_AVAILABLE
+0001075531,Booking Holdings Inc.,ACTIVE,True,False,False,False,,False,,False,,False,,False,0,{},{},NO_FINANCIAL_SOURCE_INPUT_AND_NO_FINANCIAL_TASK_HISTORY
+0000018230,CATERPILLAR INC,ACTIVE,True,False,False,False,,False,,False,,False,,False,0,{},{},NO_FINANCIAL_SOURCE_INPUT_AND_NO_FINANCIAL_TASK_HISTORY
+0001163165,CONOCOPHILLIPS,ACTIVE,True,False,False,False,,False,,False,,False,,False,0,{},{},NO_FINANCIAL_SOURCE_INPUT_AND_NO_FINANCIAL_TASK_HISTORY
+0000858877,"CISCO SYSTEMS, INC.",ACTIVE,True,False,False,False,,False,,False,,False,,False,0,{},{},NO_FINANCIAL_SOURCE_INPUT_AND_NO_FINANCIAL_TASK_HISTORY
+0000093410,CHEVRON CORP,ACTIVE,True,False,False,False,,False,,False,,False,,False,0,{},{},NO_FINANCIAL_SOURCE_INPUT_AND_NO_FINANCIAL_TASK_HISTORY
+0000040545,GENERAL ELECTRIC CO,ACTIVE,True,False,False,False,,False,,False,,False,,False,0,{},{},NO_FINANCIAL_SOURCE_INPUT_AND_NO_FINANCIAL_TASK_HISTORY
+0000354950,"HOME DEPOT, INC.",ACTIVE,True,False,False,False,,False,,False,,False,,False,0,{},{},NO_FINANCIAL_SOURCE_INPUT_AND_NO_FINANCIAL_TASK_HISTORY
+0000773840,HONEYWELL INTERNATIONAL INC,ACTIVE,True,False,False,False,,False,,False,,False,,False,0,{},{},NO_FINANCIAL_SOURCE_INPUT_AND_NO_FINANCIAL_TASK_HISTORY
+0000051143,INTERNATIONAL BUSINESS MACHINES CORP,ACTIVE,True,False,False,False,,False,,False,,False,,False,0,{},{},NO_FINANCIAL_SOURCE_INPUT_AND_NO_FINANCIAL_TASK_HISTORY
+0000896878,INTUIT INC.,ACTIVE,True,False,False,False,,False,,False,,False,,False,0,{},{},NO_FINANCIAL_SOURCE_INPUT_AND_NO_FINANCIAL_TASK_HISTORY
+0001035267,INTUITIVE SURGICAL INC,ACTIVE,True,False,False,False,,False,,False,,False,,False,0,{},{},NO_FINANCIAL_SOURCE_INPUT_AND_NO_FINANCIAL_TASK_HISTORY
+0000021344,COCA COLA CO,ACTIVE,True,False,False,False,,False,,False,,False,,False,0,{},{},NO_FINANCIAL_SOURCE_INPUT_AND_NO_FINANCIAL_TASK_HISTORY
+0000060667,LOWES COMPANIES INC,ACTIVE,True,False,False,False,,False,,False,,False,,False,0,{},{},NO_FINANCIAL_SOURCE_INPUT_AND_NO_FINANCIAL_TASK_HISTORY
+0000063908,MCDONALDS CORP,ACTIVE,True,False,False,False,,False,,False,,False,,False,0,{},{},NO_FINANCIAL_SOURCE_INPUT_AND_NO_FINANCIAL_TASK_HISTORY
+0000310158,"Merck & Co., Inc.",ACTIVE,True,False,False,False,,False,,False,,False,,False,0,{},{},NO_FINANCIAL_SOURCE_INPUT_AND_NO_FINANCIAL_TASK_HISTORY
+0000723125,MICRON TECHNOLOGY INC,ACTIVE,True,False,False,False,,False,,False,,False,,False,0,{},{},NO_FINANCIAL_SOURCE_INPUT_AND_NO_FINANCIAL_TASK_HISTORY
+0001373715,"ServiceNow, Inc.",ACTIVE,True,False,False,False,,False,,False,,False,,False,0,{},{},NO_FINANCIAL_SOURCE_INPUT_AND_NO_FINANCIAL_TASK_HISTORY
+0000077476,PEPSICO INC,ACTIVE,True,False,False,False,,False,,False,,False,,False,0,{},{},NO_FINANCIAL_SOURCE_INPUT_AND_NO_FINANCIAL_TASK_HISTORY
+0000080424,PROCTER & GAMBLE Co,ACTIVE,True,False,False,False,,False,,False,,False,,False,0,{},{},NO_FINANCIAL_SOURCE_INPUT_AND_NO_FINANCIAL_TASK_HISTORY
+0001321655,Palantir Technologies Inc.,ACTIVE,True,False,False,False,,False,,False,,False,,False,0,{},{},NO_FINANCIAL_SOURCE_INPUT_AND_NO_FINANCIAL_TASK_HISTORY
+0000804328,QUALCOMM INC/DE,ACTIVE,True,False,False,False,,False,,False,,False,,False,0,{},{},NO_FINANCIAL_SOURCE_INPUT_AND_NO_FINANCIAL_TASK_HISTORY
+0000101829,RTX Corp,ACTIVE,True,False,False,False,,False,,False,,False,,False,0,{},{},NO_FINANCIAL_SOURCE_INPUT_AND_NO_FINANCIAL_TASK_HISTORY
+0000097745,THERMO FISHER SCIENTIFIC INC.,ACTIVE,True,False,False,False,,False,,False,,False,,False,0,{},{},NO_FINANCIAL_SOURCE_INPUT_AND_NO_FINANCIAL_TASK_HISTORY
+0000097476,TEXAS INSTRUMENTS INC,ACTIVE,True,False,False,False,,False,,False,,False,,False,0,{},{},NO_FINANCIAL_SOURCE_INPUT_AND_NO_FINANCIAL_TASK_HISTORY
+0001543151,"Uber Technologies, Inc",ACTIVE,True,False,False,False,,False,,False,,False,,False,0,{},{},NO_FINANCIAL_SOURCE_INPUT_AND_NO_FINANCIAL_TASK_HISTORY
+0000100885,UNION PACIFIC CORP,ACTIVE,True,False,False,False,,False,,False,,False,,False,0,{},{},NO_FINANCIAL_SOURCE_INPUT_AND_NO_FINANCIAL_TASK_HISTORY

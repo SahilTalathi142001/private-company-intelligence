@@ -1,0 +1,27 @@
+{
+    "revenue": [
+        "Revenues",
+        "RevenueFromContractWithCustomerExcludingAssessedTax",
+        "SalesRevenueNet"
+    ],
+    "net_income": [
+        "NetIncomeLoss"
+    ],
+    "assets": [
+        "Assets"
+    ],
+    "liabilities": [
+        "Liabilities"
+    ],
+    "cash": [
+        "CashAndCashEquivalentsAtCarryingValue",
+        "CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents"
+    ],
+    "equity": [
+        "StockholdersEquity",
+        "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest"
+    ],
+    "operating_income": [
+        "OperatingIncomeLoss"
+    ]
+}

@@ -1,0 +1,352 @@
+from __future__ import annotations
+
+import argparse
+import json
+import sqlite3
+from datetime import datetime, timezone
+from pathlib import Path
+
+import pandas as pd
+
+from company_platform.registry.active_company_scope import load_active_company_ciks
+
+HARDENING_VERSION = "31.0.0"
+ROOT = Path(__file__).resolve().parents[3]
+DATA = ROOT / "data"
+CONTROL_DB = DATA / "silver" / "platform" / "control.db"
+COMPANY_MASTER = DATA / "silver" / "company" / "company.parquet"
+STEP21_SEARCH = DATA / "gold" / "company_intelligence" / "company_search" / "company_search.parquet"
+STEP16_PROFILE = DATA / "gold" / "financial_company_intelligence" / "company_intelligence_profile" / "company_intelligence_profile.parquet"
+STEP20_PROFILE = DATA / "gold" / "unified_investment_intelligence" / "investment_profile" / "investment_profile.parquet"
+RECON_SUMMARY = DATA / "gold" / "platform_reconciliation" / "summary.parquet"
+OUTPUT = DATA / "gold" / "multi_company_hardening"
+
+# Dynamic production scope. The registry, not this module, owns company identity.
+TARGET_COMPANIES: dict[str, str] = {}
+
+
+def active_target_companies() -> dict[str, str]:
+    """Return active CIK -> issuer name from the authoritative company registry."""
+    registry_path = DATA / "silver" / "platform" / "company_registry.parquet"
+    if not registry_path.exists():
+        return {cik: cik for cik in load_active_company_ciks()}
+    registry = pd.read_parquet(registry_path)
+    registry["cik"] = registry["cik"].map(cik)
+    if "status" in registry.columns:
+        registry = registry[registry["status"].astype(str).str.upper().eq("ACTIVE")]
+    if "ingestion_enabled" in registry.columns:
+        enabled = registry["ingestion_enabled"].astype(str).str.lower().isin({"true", "1", "yes", "y"})
+        registry = registry[enabled]
+    names = registry.set_index("cik")["company_name"].to_dict() if "company_name" in registry.columns else {}
+    return {c: names.get(c, c) for c in load_active_company_ciks()}
+
+
+def now():
+    return datetime.now(timezone.utc).isoformat()
+
+
+def cik(value):
+    s = str(value).strip()
+    if s.upper().startswith("SEC_"):
+        s = s[4:]
+    return s.replace(".0", "").zfill(10)
+
+
+def _read(path):
+    if not path.exists():
+        return pd.DataFrame()
+    return pd.read_parquet(path)
+
+
+def _control_rows(table):
+    if not CONTROL_DB.exists():
+        return []
+    try:
+        with sqlite3.connect(CONTROL_DB) as c:
+            rows = c.execute(f"SELECT data FROM {table}").fetchall()
+        out = []
+        for row in rows:
+            try:
+                out.append(json.loads(row[0]))
+            except Exception:
+                pass
+        return out
+    except sqlite3.Error:
+        return []
+
+
+def _check(check, passed, message, company_id=None, severity="FATAL"):
+    return {
+        "hardening_version": HARDENING_VERSION,
+        "check": check,
+        "passed": bool(passed),
+        "severity": "INFO" if passed else severity,
+        "company_id": company_id,
+        "message": message,
+        "checked_at_utc": now(),
+    }
+
+
+def audit_company_universe(*, targets: dict[str, str] | None = None):
+    checks = []
+    targets = active_target_companies() if targets is None else dict(targets)
+    target = set(targets)
+
+    master = _read(COMPANY_MASTER)
+    if master.empty:
+        checks.append(_check("COMPANY_MASTER_PRESENT", False, f"Missing or empty: {COMPANY_MASTER}"))
+        return checks
+
+    master_ciks = set(master["cik"].map(cik)) if "cik" in master.columns else set()
+    checks.append(_check(
+        "COMPANY_MASTER_TARGET_COVERAGE",
+        target.issubset(master_ciks),
+        f"missing={sorted(target - master_ciks)}"
+    ))
+
+    if "cik" in master.columns:
+        identity_conflicts = []
+        if "company_name" in master.columns:
+            identity = pd.DataFrame({
+                "cik": master["cik"].map(cik),
+                "company_name": (
+                    master["company_name"]
+                    .fillna("")
+                    .astype(str)
+                    .str.strip()
+                    .str.casefold()
+                ),
+            })
+            identity = identity[identity["company_name"] != ""]
+            name_counts = identity.groupby("cik")["company_name"].nunique()
+            identity_conflicts = sorted(
+                name_counts[name_counts > 1].index.tolist()
+            )
+
+        checks.append(_check(
+            "COMPANY_MASTER_CIK_IDENTITY_CONSISTENT",
+            not identity_conflicts,
+            (
+                "Multiple issuer names for CIKs: "
+                f"{identity_conflicts[:20]}"
+                if identity_conflicts
+                else "Ticker listings per CIK are allowed; issuer names are consistent."
+            ),
+        ))
+
+    search = _read(STEP21_SEARCH)
+    search_ciks = set(search["cik"].map(cik)) if not search.empty and "cik" in search.columns else set()
+    checks.append(_check(
+        "STEP21_TARGET_COVERAGE",
+        target.issubset(search_ciks),
+        f"present={sorted(search_ciks & target)} missing={sorted(target - search_ciks)}"
+    ))
+
+    for name, path in [
+        ("STEP16_TARGET_COVERAGE", STEP16_PROFILE),
+        ("STEP20_TARGET_COVERAGE", STEP20_PROFILE),
+    ]:
+        df = _read(path)
+        ciks = set(df["cik"].map(cik)) if not df.empty and "cik" in df.columns else set()
+        checks.append(_check(
+            name,
+            target.issubset(ciks),
+            f"present={sorted(ciks & target)} missing={sorted(target - ciks)}"
+        ))
+
+    # Cross-layer target universe must agree exactly with the active registry.
+    universes = []
+    for df in (_read(STEP21_SEARCH), _read(STEP16_PROFILE), _read(STEP20_PROFILE)):
+        if not df.empty and "cik" in df.columns:
+            universes.append(set(df["cik"].map(cik)))
+    checks.append(_check(
+        "TARGET_UNIVERSE_ALIGNMENT",
+        bool(universes) and all(u == target for u in universes),
+        "Step 16/20/21 universes must equal the active registry production scope."
+    ))
+
+    return checks
+
+
+def audit_control_plane_isolation():
+    checks = []
+    events = _control_rows("events")
+    runs = _control_rows("pipeline_runs")
+    tasks = _control_rows("task_runs")
+
+    # Identity integrity: CIK must agree with SEC_<CIK> company_id.
+    for collection_name, rows in [("EVENT", events), ("RUN", runs), ("TASK", tasks)]:
+        for row in rows:
+            cid = row.get("company_id")
+            if cid is None:
+                continue
+            expected = "SEC_" + cik(cid)
+            actual = str(cid).upper()
+            checks.append(_check(
+                f"{collection_name}_COMPANY_ID_FORMAT",
+                actual == expected,
+                f"company_id={actual} expected={expected}",
+                actual
+            ))
+
+    run_ids = {str(r.get("run_id")): r for r in runs if r.get("run_id")}
+    for task in tasks:
+        rid = str(task.get("run_id"))
+        run = run_ids.get(rid)
+        if run:
+            checks.append(_check(
+                "TASK_RUN_COMPANY_ISOLATION",
+                str(task.get("company_id")) == str(run.get("company_id")),
+                f"task_company={task.get('company_id')} run_company={run.get('company_id')}",
+                task.get("company_id")
+            ))
+
+    event_ids = {str(e.get("event_id")): e for e in events if e.get("event_id")}
+    for run in runs:
+        eid = run.get("trigger_event_id")
+        if eid and str(eid) in event_ids:
+            event = event_ids[str(eid)]
+            checks.append(_check(
+                "RUN_EVENT_COMPANY_ISOLATION",
+                str(run.get("company_id")) == str(event.get("company_id")),
+                f"run_company={run.get('company_id')} event_company={event.get('company_id')}",
+                run.get("company_id")
+            ))
+
+    # Duplicate trigger-event lineage must remain impossible.
+    triggers = [str(r.get("trigger_event_id")) for r in runs if r.get("trigger_event_id")]
+    checks.append(_check(
+        "UNIQUE_TRIGGER_EVENT_RUN",
+        len(triggers) == len(set(triggers)),
+        f"runs_with_trigger={len(triggers)} duplicate_triggers={len(triggers)-len(set(triggers))}"
+    ))
+
+    return checks
+
+
+def audit_artifact_isolation(*, targets: dict[str, str] | None = None):
+    checks = []
+    for name, path in [
+        ("STEP21", STEP21_SEARCH),
+        ("STEP16", STEP16_PROFILE),
+        ("STEP20", STEP20_PROFILE),
+    ]:
+        df = _read(path)
+        if df.empty or "cik" not in df.columns:
+            checks.append(_check(f"{name}_ARTIFACT_IDENTITY", False, f"Missing/unreadable identity artifact: {path}"))
+            continue
+        normalized = df["cik"].map(cik)
+        checks.append(_check(
+            f"{name}_ARTIFACT_IDENTITY",
+            normalized.isin(set(targets)).all(),
+            f"unexpected_ciks={sorted(set(normalized) - set(targets))}"
+        ))
+        checks.append(_check(
+            f"{name}_ONE_ROW_PER_CIK",
+            not normalized.duplicated().any(),
+            f"duplicate_ciks={sorted(normalized[normalized.duplicated()].unique())[:20]}"
+        ))
+    return checks
+
+
+def audit_reconciliation_coverage():
+    checks = []
+    summary = _read(RECON_SUMMARY)
+    if summary.empty:
+        checks.append(_check("RECONCILIATION_ARTIFACT_PRESENT", False, f"Missing: {RECON_SUMMARY}"))
+        return checks
+
+    row = summary.iloc[0]
+    checks.append(_check(
+        "RECONCILIATION_STATUS",
+        row.get("reconciliation_status") == "READY",
+        f"status={row.get('reconciliation_status')}"
+    ))
+    # Step 29 currently reports the active control-plane universe, not the
+    # static company master. Therefore coverage is informational here.
+    checks.append(_check(
+        "RECONCILIATION_ZERO_FAILURES",
+        int(row.get("failed_checks", 0) or 0) == 0,
+        f"failed_checks={row.get('failed_checks')}"
+    ))
+    return checks
+
+
+def reconcile(*, execution_scope: dict[str, str] | None = None):
+    """Run Step 31 using an explicit scope or the authoritative registry.
+
+    Production callers omit execution_scope and therefore use the active
+    company registry. Tests/recovery/batch callers may inject an explicit
+    isolated scope without changing global production configuration.
+    """
+    targets = active_target_companies() if execution_scope is None else dict(execution_scope)
+    if not targets:
+        raise ValueError("Step 31 execution scope must contain at least one company.")
+
+    checks = audit_company_universe(targets=targets)
+    checks += audit_control_plane_isolation()
+    checks += audit_artifact_isolation(targets=targets)
+    checks += audit_reconciliation_coverage()
+
+    df = pd.DataFrame(checks)
+    failed = int((~df["passed"]).sum()) if not df.empty else 0
+    fatal = int((~df["passed"] & df["severity"].eq("FATAL")).sum()) if not df.empty else 0
+
+    company_status = []
+    for c, name in targets.items():
+        company_status.append({
+            "hardening_version": HARDENING_VERSION,
+            "cik": c,
+            "company_id": f"SEC_{c}",
+            "company_name": name,
+            "in_target_scope": True,
+            "generated_at_utc": now(),
+        })
+
+    summary = pd.DataFrame([{
+        "hardening_version": HARDENING_VERSION,
+        "generated_at_utc": now(),
+        "target_company_count": len(targets),
+        "checks": len(df),
+        "passed_checks": int(df["passed"].sum()) if not df.empty else 0,
+        "failed_checks": failed,
+        "fatal_failures": fatal,
+        "status": "READY" if fatal == 0 else "NOT_READY",
+        "cross_company_isolation_enforced": True,
+        "one_row_per_company_enforced": True,
+        "target_universe_enforced": True,
+    }])
+
+    return summary, df, pd.DataFrame(company_status)
+
+
+def write(summary, checks, companies, output=OUTPUT):
+    output.mkdir(parents=True, exist_ok=True)
+    summary.to_parquet(output / "summary.parquet", index=False)
+    checks.to_parquet(output / "hardening_checks.parquet", index=False)
+    companies.to_parquet(output / "target_companies.parquet", index=False)
+
+
+def main():
+    p = argparse.ArgumentParser(description="Step 31 multi-company hardening")
+    p.add_argument("--output", type=Path, default=OUTPUT)
+    args = p.parse_args()
+    summary, checks, companies = reconcile()
+    write(summary, checks, companies, args.output)
+    s = summary.iloc[0]
+    print("=" * 80)
+    print("STEP 31 - MULTI-COMPANY HARDENING")
+    print(f"Hardening version     : {HARDENING_VERSION}")
+    print(f"Target companies      : {int(s['target_company_count'])}")
+    print(f"Checks                : {int(s['checks'])}")
+    print(f"Passed checks         : {int(s['passed_checks'])}")
+    print(f"Failed checks         : {int(s['failed_checks'])}")
+    print(f"Fatal failures        : {int(s['fatal_failures'])}")
+    print(f"Status                : {s['status']}")
+    print(f"Output                : {args.output}")
+    print("=" * 80)
+    return 0 if s["status"] == "READY" else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

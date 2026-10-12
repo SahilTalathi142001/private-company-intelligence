@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="theme-color" content="#101820" />
+  <meta name="description" content="Source-aware private company intelligence for investors and analysts." />
+  <title>CIDM — Private Company Intelligence</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@400;500;600;700&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/assets/styles.css" />
+  <script defer src="/assets/app.js"></script>
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar" id="sidebar">
+      <a class="brand" href="#/" aria-label="CIDM home"><span class="brand-mark">C</span><span class="brand-copy"><b>CIDM</b><small>INTELLIGENCE PLATFORM</small></span></a>
+      <div class="side-label">WORKSPACE</div>
+      <nav class="main-nav" aria-label="Main navigation">
+        <a href="#/" data-nav="home"><span class="nav-icon">◫</span> Overview</a>
+        <a href="#/companies" data-nav="companies"><span class="nav-icon">▦</span> Company universe</a>
+        <a href="#/coverage" data-nav="coverage"><span class="nav-icon">◉</span> Data coverage</a>
+        <a href="#/operations" data-nav="operations"><span class="nav-icon">⌁</span> Platform health</a>
+      </nav>
+      <div class="sidebar-bottom"><div class="secure-indicator"><span class="status-dot"></span><span><b>Source-aware data</b><small>Missing data stays missing</small></span></div><div class="side-version">CIDM · API v1</div></div>
+    </aside>
+    <main class="main-area">
+      <header class="topbar"><button class="mobile-menu" id="mobile-menu" aria-label="Toggle navigation">☰</button><div class="breadcrumb" id="breadcrumb">Workspace <span>/</span> Overview</div><div class="topbar-right"><span class="live-chip" id="data-status"><i></i> CHECKING REGISTRY</span><a class="docs-link" href="/api/docs" target="_blank" rel="noreferrer">API docs ↗</a><div class="avatar">CI</div></div></header>
+      <section class="page-content" id="app" aria-live="polite"><div class="loading"><span class="loader"></span>Loading intelligence workspace…</div></section>
+      <footer class="footer"><span>© CIDM · Private Company Intelligence</span><span>Evidence first. Inference disclosed. Gaps visible.</span></footer>
+    </main>
+  </div>
+  <div class="toast" id="toast" role="status"></div>
+</body>
+</html>

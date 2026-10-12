@@ -1,0 +1,10 @@
+.venv
+.venv-1
+data
+logs
+backups
+**/__pycache__
+**/*.pyc
+.git
+agent-transcripts
+debug-63fc53.log
