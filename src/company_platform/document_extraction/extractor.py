@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import html
+import html.parser as html_parser
 import importlib
 import re
+import xml.etree.ElementTree as ElementTree
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -67,23 +69,44 @@ def _extract_txt(path: Path) -> list[dict]:
     ]
 
 
-def _extract_html(path: Path) -> list[dict]:
-    raw = path.read_text(encoding="utf-8-sig", errors="replace")
+class _VisibleTextParser(html_parser.HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self._skip = 0
+        self._parts: list[str] = []
 
+    def handle_starttag(self, tag: str, attrs) -> None:
+        if tag in {"script", "style", "noscript", "template"}:
+            self._skip += 1
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in {"script", "style", "noscript", "template"} and self._skip:
+            self._skip -= 1
+
+    def handle_data(self, data: str) -> None:
+        if not self._skip and data.strip():
+            self._parts.append(data)
+
+    def text(self) -> str:
+        return "\n".join(self._parts)
+
+
+def _visible_markup_text(raw: str) -> str:
     try:
         beautifulsoup = importlib.import_module("bs4")
-    except ModuleNotFoundError as exc:
-        raise ImportError(
-            "HTML extraction requires the beautifulsoup4 package"
-        ) from exc
-
+    except ModuleNotFoundError:
+        parser = _VisibleTextParser()
+        parser.feed(raw)
+        return parser.text()
     soup = beautifulsoup.BeautifulSoup(raw, "html.parser")
-
     for element in soup(["script", "style", "noscript", "template"]):
         element.decompose()
+    return soup.get_text("\n")
 
-    text = soup.get_text("\n")
-    text = _normalise_text(text)
+
+def _extract_html(path: Path) -> list[dict]:
+    raw = path.read_text(encoding="utf-8-sig", errors="replace")
+    text = _normalise_text(_visible_markup_text(raw))
 
     return [
         {
@@ -94,16 +117,19 @@ def _extract_html(path: Path) -> list[dict]:
 
 def _extract_xml(path: Path) -> list[dict]:
     raw = path.read_text(encoding="utf-8-sig", errors="replace")
-
     try:
         beautifulsoup = importlib.import_module("bs4")
-    except ModuleNotFoundError as exc:
-        raise ImportError(
-            "XML extraction requires the beautifulsoup4 package"
-        ) from exc
-
-    soup = beautifulsoup.BeautifulSoup(raw, "xml")
-    text = _normalise_text(soup.get_text("\n"))
+    except ModuleNotFoundError:
+        try:
+            root = ElementTree.fromstring(raw)
+        except ElementTree.ParseError:
+            text = _visible_markup_text(raw)
+        else:
+            text = "\n".join(part for part in root.itertext() if part and part.strip())
+    else:
+        soup = beautifulsoup.BeautifulSoup(raw, "xml")
+        text = soup.get_text("\n")
+    text = _normalise_text(text)
 
     return [
         {

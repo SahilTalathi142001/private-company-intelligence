@@ -30,9 +30,7 @@ import numpy as np
 # CONFIGURATION
 # ============================================================
 
-BASE_DIR = Path(
-    r"C:\Users\stalathi\Desktop\private-company-intelligence"
-)
+BASE_DIR = Path(__file__).resolve().parents[2]
 
 QUARTERLY_DIR = (
     BASE_DIR

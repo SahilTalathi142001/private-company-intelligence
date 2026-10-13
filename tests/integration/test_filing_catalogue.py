@@ -455,6 +455,65 @@ def test_daily_refresh_failure_is_isolated_and_promote_still_runs(tmp_path):
     assert result["tasks"]["promote"]["valuation_status"] == "NO_DATA"
 
 
+def test_daily_refresh_keeps_the_pipeline_error_and_retries_the_cik(tmp_path):
+    data = _seed(tmp_path)
+    calls = []
+    pipeline_error = "ImportError: HTML extraction requires the beautifulsoup4 package"
+
+    def refresh(ciks):
+        calls.append(list(ciks))
+        if len(calls) == 1:
+            return {
+                "company_failures": 1,
+                "runs": [{
+                    "run_status": "FAILED",
+                    "error": pipeline_error,
+                    "run_id": "pipeline-1",
+                }],
+            }
+        return {"ciks": list(ciks), "company_failures": 0, "runs": []}
+
+    def new_filing(cik):
+        return [{
+            "accessionNumber": "0000320193-26-000099",
+            "filingDate": "2026-06-01",
+            "form": "8-K",
+            "primaryDocument": "new.htm",
+        }]
+
+    first = run_daily(
+        data,
+        env="dev",
+        run_at=datetime(2026, 10, 13, tzinfo=timezone.utc),
+        run_id="2026-10-13T145042Z",
+        poll_recent=new_filing,
+        download_accession=lambda cik, filing: None,
+        refresh_fn=refresh,
+        promote_fn=_quiet_promote,
+    )
+    stored = first["tasks"]["refresh"]["company_failures"][0]["error"]
+    assert "FAILED" in stored
+    assert pipeline_error in stored
+    assert "run_id=pipeline-1" in stored
+    assert "company refresh failure" not in stored
+
+    second = run_daily(
+        data,
+        env="dev",
+        run_at=datetime(2026, 10, 14, tzinfo=timezone.utc),
+        run_id="2026-10-14T145042Z",
+        poll_recent=lambda cik: [],
+        download_accession=lambda cik, filing: None,
+        refresh_fn=refresh,
+        promote_fn=_quiet_promote,
+    )
+    assert calls == [["0000320193"], ["0000320193"]]
+    assert second["tasks"]["extract"]["downloaded_ciks"] == []
+    assert second["tasks"]["refresh"]["ciks"] == ["0000320193"]
+    assert second["tasks"]["refresh"]["company_failures"] == []
+    assert second["tasks"]["promote"]["valuation_status"] == "NO_DATA"
+
+
 def test_prod_env_is_a_separate_tree(tmp_path):
     data = _seed(tmp_path)
     publish_catalogue(data, env="prod", run_at=datetime(2026, 10, 1, tzinfo=timezone.utc))

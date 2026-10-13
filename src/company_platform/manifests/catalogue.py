@@ -828,6 +828,66 @@ def _default_refresh(ciks: list[str]) -> dict:
     return apply_refresh(ciks)
 
 
+def _failed_refresh_runs(result: dict) -> list[dict]:
+    runs = result.get("runs") or []
+    failed = []
+    for run in runs:
+        if not isinstance(run, dict):
+            continue
+        if run.get("run_status") in {"SUCCESS", "PARTIAL", None}:
+            continue
+        if run.get("action") in {"NO_OP_ALREADY_COMPLETED", "NO_OP_ALREADY_CLAIMED"}:
+            continue
+        failed.append(run)
+    return failed
+
+
+def _refresh_failure_error(result: dict, failed_count: int) -> str:
+    parts = []
+    for run in _failed_refresh_runs(result):
+        status = _text(run.get("run_status")) or "FAILED"
+        error = _text(run.get("error"))
+        run_id = _text(run.get("run_id"))
+        text = f"{status}: {error}" if error else status
+        if run_id:
+            text = f"{text} run_id={run_id}"
+        parts.append(text)
+    if parts:
+        return "; ".join(parts)
+    return f"{failed_count} company refresh failure(s)"
+
+
+def _ciks_to_retry(root: Path, current_run_id: str) -> list[str]:
+    """CIKs whose latest completed run still has a refresh failure.
+
+    A company leaves this list when a later refresh succeeds and the newest
+    run file no longer records REFRESH_FAILED for that CIK.
+    """
+    runs_dir = root / "runs"
+    if not runs_dir.exists():
+        return []
+    files = sorted(
+        path for path in runs_dir.glob("*.json")
+        if path.is_file() and path.stem != current_run_id
+    )
+    if not files:
+        return []
+    try:
+        latest = json.loads(files[-1].read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    refresh = latest.get("tasks", {}).get("refresh", {})
+    succeeded = {_text(cik) for cik in (refresh.get("ciks") or [])}
+    selected = []
+    for row in refresh.get("company_failures") or []:
+        if not isinstance(row, dict) or row.get("document_status") != "REFRESH_FAILED":
+            continue
+        cik = _text(row.get("cik"))
+        if cik and cik not in succeeded and cik not in selected:
+            selected.append(cik)
+    return selected
+
+
 def run_daily(
     data_root: Path | None = None,
     env: str = "dev",
@@ -905,6 +965,9 @@ def run_daily(
 
     def refresh() -> dict:
         selected = list(state["tasks"].get("extract", {}).get("downloaded_ciks") or [])
+        for cik in _ciks_to_retry(root, run_id):
+            if cik not in selected:
+                selected.append(cik)
         if not selected:
             return {"ciks": [], "company_failures": []}
         failures = []
@@ -918,7 +981,7 @@ def run_daily(
                         cik,
                         None,
                         "REFRESH_FAILED",
-                        f"{failed_count} company refresh failure(s)",
+                        _refresh_failure_error(result, failed_count),
                     ))
                 else:
                     refreshed.append(cik)
