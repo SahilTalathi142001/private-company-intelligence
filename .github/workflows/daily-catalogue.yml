@@ -1,0 +1,77 @@
+name: Daily catalogue
+
+on:
+  schedule:
+    - cron: "0 23 * * 1-5"
+  workflow_dispatch:
+
+concurrency:
+  group: catalogue-prod
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  catalogue:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      AWS_REGION: us-east-1
+      AWS_DEFAULT_REGION: us-east-1
+      PYTHONPATH: src
+      SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Install AWS CLI
+        run: |
+          if ! command -v aws >/dev/null 2>&1; then
+            curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip
+            unzip -q /tmp/awscliv2.zip -d /tmp
+            sudo /tmp/aws/install
+          fi
+          aws --version
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python dependencies
+        run: pip install "pandas>=2.2,<3.0" "pyarrow>=18,<25" requests tenacity python-dotenv
+
+      - name: Require SEC user agent
+        run: |
+          if [ -z "${SEC_USER_AGENT}" ]; then
+            echo "SEC_USER_AGENT secret is not set"
+            exit 1
+          fi
+
+      - name: Sync lake from S3
+        id: sync-down
+        run: |
+          set -euo pipefail
+          bucket="s3://private-company-intelligence"
+          aws s3 sync "$bucket/bronze" data/bronze --only-show-errors
+          aws s3 sync "$bucket/silver" data/silver --only-show-errors
+          aws s3 sync "$bucket/gold" data/gold --only-show-errors
+          aws s3 sync "$bucket/manifests/prod" data/manifests/prod --only-show-errors
+
+      - name: Run daily catalogue
+        run: python -m company_platform.manifests.catalogue --env prod
+
+      - name: Sync changes to S3
+        if: always() && steps.sync-down.outcome == 'success'
+        run: |
+          set -euo pipefail
+          bucket="s3://private-company-intelligence"
+          aws s3 sync data/bronze "$bucket/bronze" --only-show-errors
+          aws s3 sync data/silver "$bucket/silver" --only-show-errors
+          aws s3 sync data/gold "$bucket/gold" --only-show-errors
+          aws s3 sync data/manifests/prod "$bucket/manifests/prod" --only-show-errors

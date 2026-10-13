@@ -340,6 +340,121 @@ def test_daily_run_isolates_failures_and_retries_only_the_failed_task(tmp_path):
     assert not (data / "silver" / "valuation" / "company_valuations.parquet").exists()
 
 
+def _quiet_promote(data_root, env):
+    return {"valuation_status": "NO_DATA", "valuation_file_written": False}
+
+
+def test_daily_refresh_skips_when_no_accession_is_new(tmp_path):
+    data = _seed(tmp_path)
+    calls = []
+
+    def refresh(ciks):
+        calls.append(list(ciks))
+
+    result = run_daily(
+        data,
+        env="dev",
+        run_at=datetime(2026, 10, 12, tzinfo=timezone.utc),
+        run_id="refresh-none",
+        poll_recent=lambda cik: [],
+        download_accession=lambda cik, filing: None,
+        refresh_fn=refresh,
+        promote_fn=_quiet_promote,
+    )
+    assert calls == []
+    assert result["status"] == "SUCCESS"
+    assert result["tasks"]["refresh"]["status"] == "SUCCESS"
+    assert result["tasks"]["refresh"]["ciks"] == []
+    assert result["tasks"]["promote"]["status"] == "SUCCESS"
+
+
+def test_daily_refresh_passes_only_the_cik_that_downloaded(tmp_path):
+    data = _seed(tmp_path)
+    seen = []
+    order = []
+
+    def refresh(ciks):
+        order.append("refresh")
+        seen.append(list(ciks))
+        return {"ciks": list(ciks)}
+
+    def promote(data_root, env):
+        order.append("promote")
+        return _quiet_promote(data_root, env)
+
+    result = run_daily(
+        data,
+        env="dev",
+        run_at=datetime(2026, 10, 12, tzinfo=timezone.utc),
+        run_id="refresh-one",
+        poll_recent=lambda cik: [{
+            "accessionNumber": "0000320193-26-000099",
+            "filingDate": "2026-06-01",
+            "form": "8-K",
+            "primaryDocument": "new.htm",
+        }],
+        download_accession=lambda cik, filing: None,
+        refresh_fn=refresh,
+        promote_fn=promote,
+    )
+    assert seen == [["0000320193"]]
+    assert order == ["refresh", "promote"]
+    assert result["tasks"]["refresh"]["ciks"] == ["0000320193"]
+    assert result["tasks"]["extract"]["downloaded_ciks"] == ["0000320193"]
+    assert result["status"] == "SUCCESS"
+
+
+def test_daily_refresh_failure_is_isolated_and_promote_still_runs(tmp_path):
+    data = _seed(tmp_path)
+    other = "0000789019"
+    registry = pd.read_parquet(data / "silver" / "platform" / "company_registry.parquet")
+    registry = pd.concat([
+        registry,
+        pd.DataFrame([_registry_row(other, "Microsoft Corp", "MSFT")]),
+    ], ignore_index=True)
+    registry.to_parquet(data / "silver" / "platform" / "company_registry.parquet", index=False)
+    order = []
+
+    def poll(cik):
+        return [{
+            "accessionNumber": f"{cik}-26-000099",
+            "filingDate": "2026-06-01",
+            "form": "8-K",
+            "primaryDocument": "new.htm",
+            "companyName": "Example",
+        }]
+
+    def refresh(ciks):
+        order.append(ciks[0])
+        if ciks == ["0000320193"]:
+            raise RuntimeError("refresh broke")
+        return {"ciks": list(ciks)}
+
+    def promote(data_root, env):
+        order.append("promote")
+        return _quiet_promote(data_root, env)
+
+    result = run_daily(
+        data,
+        env="dev",
+        run_at=datetime(2026, 10, 12, tzinfo=timezone.utc),
+        run_id="refresh-fail",
+        poll_recent=poll,
+        download_accession=lambda cik, filing: None,
+        refresh_fn=refresh,
+        promote_fn=promote,
+    )
+    assert result["status"] == "SUCCESS"
+    assert order == ["0000320193", "0000789019", "promote"]
+    failures = result["tasks"]["refresh"]["company_failures"]
+    assert failures[0]["cik"] == "0000320193"
+    assert failures[0]["document_status"] == "REFRESH_FAILED"
+    assert "refresh broke" in failures[0]["error"]
+    assert result["tasks"]["refresh"]["ciks"] == ["0000789019"]
+    assert result["tasks"]["promote"]["status"] == "SUCCESS"
+    assert result["tasks"]["promote"]["valuation_status"] == "NO_DATA"
+
+
 def test_prod_env_is_a_separate_tree(tmp_path):
     data = _seed(tmp_path)
     publish_catalogue(data, env="prod", run_at=datetime(2026, 10, 1, tzinfo=timezone.utc))

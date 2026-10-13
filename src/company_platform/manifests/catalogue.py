@@ -799,7 +799,7 @@ def _add_failure_rows(data_root: Path, env: str, run_date: str, rows: list[dict]
     _write_frame(path, current)
 
 
-TASKS = ("extract", "catalogue", "promote")
+TASKS = ("extract", "catalogue", "refresh", "promote")
 
 
 def _run_file(root: Path, run_id: str) -> Path:
@@ -822,6 +822,12 @@ def _save_run(path: Path, state: dict) -> None:
     path.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
 
 
+def _default_refresh(ciks: list[str]) -> dict:
+    from company_platform.sec_detection.apply_refresh import apply_refresh
+
+    return apply_refresh(ciks)
+
+
 def run_daily(
     data_root: Path | None = None,
     env: str = "dev",
@@ -830,8 +836,9 @@ def run_daily(
     poll_recent=None,
     download_accession=None,
     promote_fn=None,
+    refresh_fn=None,
 ) -> dict:
-    """Poll new accessions, publish the catalogue, and promote lineaged gold.
+    """Poll new accessions, refresh only those companies, and promote lineaged gold.
 
     One company or accession failure is recorded. The other companies still run.
     A rerun with the same run id retries only tasks that are not SUCCESS.
@@ -845,6 +852,7 @@ def run_daily(
     state = _load_run(path, run_id, env)
     poll_recent = poll_recent or _default_poll_recent
     download_accession = download_accession or _default_download
+    refresh_fn = refresh_fn or _default_refresh
     registry = _registry(data_root)
     ciks = _active_ciks(registry)
 
@@ -852,6 +860,7 @@ def run_daily(
         known = _known_filing_ids(data_root, env)
         failures = []
         downloaded = []
+        downloaded_ciks = []
         for cik in ciks:
             try:
                 recent = poll_recent(cik) or []
@@ -870,11 +879,17 @@ def run_daily(
                     else:
                         raise ValueError("primary document was not stated")
                     downloaded.append(accession)
+                    if cik not in downloaded_ciks:
+                        downloaded_ciks.append(cik)
                     known.add(accession)
                 except Exception as exc:
                     failures.append(_failure_row(cik, filing, "EXTRACT_FAILED", f"{type(exc).__name__}: {exc}"))
         _add_failure_rows(data_root, env, run_date, failures)
-        return {"company_failures": failures, "downloaded": downloaded}
+        return {
+            "company_failures": failures,
+            "downloaded": downloaded,
+            "downloaded_ciks": downloaded_ciks,
+        }
 
     def catalogue() -> dict:
         failures = []
@@ -888,12 +903,36 @@ def run_daily(
         _add_failure_rows(data_root, env, run_date, failures)
         return {"company_failures": failures}
 
+    def refresh() -> dict:
+        selected = list(state["tasks"].get("extract", {}).get("downloaded_ciks") or [])
+        if not selected:
+            return {"ciks": [], "company_failures": []}
+        failures = []
+        refreshed = []
+        for cik in selected:
+            try:
+                result = refresh_fn([cik]) or {}
+                failed_count = int(result.get("company_failures") or 0) if isinstance(result, dict) else 0
+                if failed_count:
+                    failures.append(_failure_row(
+                        cik,
+                        None,
+                        "REFRESH_FAILED",
+                        f"{failed_count} company refresh failure(s)",
+                    ))
+                else:
+                    refreshed.append(cik)
+            except Exception as exc:
+                failures.append(_failure_row(cik, None, "REFRESH_FAILED", f"{type(exc).__name__}: {exc}"))
+        _add_failure_rows(data_root, env, run_date, failures)
+        return {"ciks": refreshed, "company_failures": failures}
+
     def promote() -> dict:
         if promote_fn is not None:
             return promote_fn(data_root, env)
         return promote_local(data_root, env=env)
 
-    runners = {"extract": extract, "catalogue": catalogue, "promote": promote}
+    runners = {"extract": extract, "catalogue": catalogue, "refresh": refresh, "promote": promote}
     for name in TASKS:
         if state["tasks"].get(name, {}).get("status") == "SUCCESS":
             continue
