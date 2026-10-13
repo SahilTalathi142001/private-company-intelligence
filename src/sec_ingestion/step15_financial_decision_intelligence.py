@@ -173,9 +173,7 @@ DECISION_PRIORITY = {
 # PROJECT PATHS
 # =============================================================================
 
-DEFAULT_BASE_DIR = Path(
-    r"C:\Users\stalathi\Desktop\private-company-intelligence"
-)
+DEFAULT_BASE_DIR = Path(__file__).resolve().parents[2]
 
 
 DEFAULT_FEATURES_DIR = (

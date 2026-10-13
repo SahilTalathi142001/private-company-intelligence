@@ -175,29 +175,31 @@ HEALTH_SCORE_BANDS = {
 # PATHS
 # =============================================================================
 
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
 DEFAULT_FEATURES = (
-    Path(r"C:\Users\stalathi\Desktop\private-company-intelligence")
+    _PROJECT_ROOT
     / "data"
     / "gold"
     / "financials_features"
 )
 
 DEFAULT_VALIDATION = (
-    Path(r"C:\Users\stalathi\Desktop\private-company-intelligence")
+    _PROJECT_ROOT
     / "data"
     / "gold"
     / "financials_feature_validation"
 )
 
 DEFAULT_INTELLIGENCE = (
-    Path(r"C:\Users\stalathi\Desktop\private-company-intelligence")
+    _PROJECT_ROOT
     / "data"
     / "gold"
     / "financial_intelligence"
 )
 
 DEFAULT_OUTPUT = (
-    Path(r"C:\Users\stalathi\Desktop\private-company-intelligence")
+    _PROJECT_ROOT
     / "data"
     / "gold"
     / "financial_intelligence_validation"
